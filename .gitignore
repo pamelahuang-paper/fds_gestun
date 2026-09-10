@@ -1,0 +1,39 @@
+# ---- SECRETS: never commit ----------------------------------------------
+utils/risk_creds.py
+*credential*
+*secret*
+.env
+*.pem
+*.p12
+
+# ---- large data: rebuild from BigQuery, do not version -------------------
+*.parquet
+artifacts-final/
+
+# ---- build artefacts: CI rebuilds these ---------------------------------
+artifacts/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# ---- superseded training snapshots (fds_gestun_training_set.csv is canonical)
+fds_gestun_features_company.csv
+fds_gestun_features_company_v2.csv
+fds_gestun_features_company_v3.csv
+fds_gestun_features_company_v4.csv
+fds_gestun_features_company_v5.csv
+fds_gestun_features_company_v6.csv
+
+# ---- scoring run output --------------------------------------------------
+fds_gestun_features_compare.csv
+fds_gestun_features_35.csv
+fds_gestun_features_new13.csv
+fds_gestun_features_batch3.csv
+fds_comparison_predictions.csv
+compare_*.csv

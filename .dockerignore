@@ -1,0 +1,6 @@
+*.ipynb
+*.parquet
+artifacts/
+tests/
+.venv/
+__pycache__/

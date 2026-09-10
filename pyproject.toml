@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fds-gestun"
+version = "1.0.0"
+description = "Gestun (credit-card cash-out) detection for paper.id"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "xgboost>=2.0",
+    "google-cloud-bigquery>=3.11",
+    "google-cloud-bigquery-storage>=2.22",
+    "db-dtypes>=1.1",
+    "pyarrow>=12.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+
+[project.scripts]
+fds-gestun = "fds_gestun.cli:main"
+
+[tool.setuptools]
+packages = ["fds_gestun"]
+
+[tool.setuptools.package-data]
+fds_gestun = ["sql/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
