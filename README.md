@@ -130,12 +130,59 @@ fds_gestun/
   evaluate.py   cross-validation and the threshold table
   cli.py        fds-gestun entry point
   sql/          one .sql per feature source, all @company_ids parameterised
-tests/          19 tests, no BigQuery needed
+dags/         Airflow DAG (weekly scoring)
+tests/          25 tests, no BigQuery needed
 ```
 
 `sql/` is the source of truth for feature definitions. The notebooks
 (`FDS_Gestun_Combined_Features.ipynb`, `FDS_Gestun_Scoring.ipynb`) are exploration
 and analysis; they are not on the deployment path.
+
+## Scheduling (Airflow)
+
+`dags/fds_gestun_scoring.py` runs weekly, Mondays 03:00 Jakarta. Four tasks:
+
+```
+select_candidates -> build_features -> score -> publish
+```
+
+- **select_candidates** — companies active in the last 30 days with at least 10
+  transactions, excluding anything already labelled. Scoring a company the model
+  trained on returns a fitted value, not a prediction.
+- **build_features** — the slow step, one BigQuery job per source (~10 min per
+  1k companies). Cached to `/tmp`, so a scoring failure does not force a rebuild.
+- **score** — XGBoost forward pass on the worker. Logs a warning if the flag rate
+  exceeds 50%, which means the batch does not resemble the training population.
+- **publish** — load job into `datascience_public.fds_gestun_scores`.
+
+Everything is overridable at trigger time via DAG params: `lookback_days`,
+`min_transactions`, `threshold`, `max_companies`.
+
+### Worker requirements
+
+The workers import `fds_gestun`, so install it there:
+
+```bash
+pip install git+ssh://git@github.com/paper-id/fds-gestun.git@main
+```
+
+Auth uses the `google_cloud_default` connection — do not set `FDS_GCP_CREDENTIALS`
+on the workers.
+
+The model artefact must exist on the worker (`FDS_MODEL_DIR`, default
+`./artifacts`). Either bake it in at image build time or add a `fds-gestun train`
+step ahead of `score`; training takes ~75s and needs no BigQuery.
+
+### Deploying the DAG
+
+`.github/workflows/deploy.yml` runs the tests, then syncs `dags/` to the Composer
+bucket. For self-hosted Airflow, swap the `gsutil rsync` step for an rsync to your
+DAG folder. Required secrets: `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`,
+`COMPOSER_DAG_BUCKET`, `COMPOSER_ENV`, `COMPOSER_REGION`.
+
+The scheduled run uses threshold **0.7**, not the 0.5 library default: out-of-fold
+that is precision 0.932 against 0.866, which is what matters for a queue people
+actually work.
 
 ## Retraining
 

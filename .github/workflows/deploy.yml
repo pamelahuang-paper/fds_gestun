@@ -1,49 +1,46 @@
-name: Deploy
+name: Deploy DAG
 
 on:
   push:
     branches: [main]
     paths:
+      - "dags/**"
       - "fds_gestun/**"
-      - "deploy/**"
       - "pyproject.toml"
       - "fds_gestun_training_set.csv"
   workflow_dispatch:
-
-env:
-  REGION: asia-southeast2
-  REPO: fds
-  IMAGE: fds-gestun
-  JOB: fds-gestun-score
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write          # keyless auth, no service-account JSON in secrets
+      id-token: write            # keyless: no service-account JSON in secrets
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Test before shipping
+        run: |
+          pip install -e ".[dev]" "apache-airflow==3.3.*"
+          pytest -q
 
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
-
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and push
-        run: |
-          IMG="${REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${REPO}/${IMAGE}"
-          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
-          docker build -f deploy/Dockerfile -t "${IMG}:${GITHUB_SHA}" -t "${IMG}:latest" .
-          docker push "${IMG}:${GITHUB_SHA}"
-          docker push "${IMG}:latest"
+      # Cloud Composer: the DAG folder is a GCS bucket.
+      # Self-hosted Airflow: replace this step with an rsync to the dags folder.
+      - name: Sync DAG to Composer
+        run: gsutil -m rsync -r -d dags "${{ secrets.COMPOSER_DAG_BUCKET }}/dags"
 
-      - name: Update the Cloud Run job
+      # The workers import fds_gestun, so a package change needs a reinstall.
+      - name: Update the package on the Composer environment
         run: |
-          IMG="${REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${REPO}/${IMAGE}"
-          gcloud run jobs update "${JOB}" \
-            --image "${IMG}:${GITHUB_SHA}" \
-            --region "${REGION}" \
-            --quiet
+          gcloud composer environments update "${{ secrets.COMPOSER_ENV }}" \
+            --location "${{ secrets.COMPOSER_REGION }}" \
+            --update-pypi-package "fds-gestun==$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
