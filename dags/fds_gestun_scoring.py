@@ -1,4 +1,4 @@
-"""Weekly gestun scoring.
+"""Daily gestun scoring.
 
 Selects companies with recent activity, builds the feature matrix from BigQuery,
 scores them and lands the result in BigQuery for the review queue.
@@ -10,7 +10,7 @@ pass, so this is light on Airflow resources. Feature building is the slow step
 Written for Airflow 3.x (airflow.sdk). Requires `fds-gestun` installed on the
 workers:  pip install git+ssh://git@github.com/paper-id/fds-gestun.git@main
 
-Pipeline role : the weekly schedule. Calls the package; holds no feature logic.
+Pipeline role : the daily schedule. Calls the package; holds no feature logic.
 Deploy        : REQUIRED, but it goes to the Airflow DAG folder, NOT into the
                 installed package.
 Change when   : the cadence, the candidate query, or the queue thresholds move.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import pendulum
+from airflow.exceptions import AirflowSkipException
 from airflow.sdk import Param, dag, task
 
 log = logging.getLogger(__name__)
@@ -34,8 +35,8 @@ DEFAULT_THRESHOLD = 0.7
 
 @dag(
     dag_id="fds_gestun_scoring",
-    description="Weekly gestun (credit-card cash-out) scoring",
-    schedule="0 3 * * 1",                       # Mondays 03:00
+    description="Daily gestun (credit-card cash-out) scoring",
+    schedule="0 3 * * *",                       # every day 03:00
     start_date=pendulum.datetime(2026, 9, 1, tz="Asia/Jakarta"),
     catchup=False,
     max_active_runs=1,
@@ -47,8 +48,16 @@ DEFAULT_THRESHOLD = 0.7
     },
     tags=["fds", "gestun", "ml"],
     params={
-        "lookback_days": Param(30, type="integer",
-                               description="Activity window for candidate selection"),
+        "lookback_days": Param(1, type="integer",
+                               description="Only companies that transacted in this "
+                                           "many days. 1 = yesterday's activity, "
+                                           "which is the incremental set for a "
+                                           "daily run. Widen for a backfill."),
+        "min_rescore_days": Param(14, type="integer",
+                                  description="Skip a company scored more recently "
+                                              "than this. Features use 7/30-day "
+                                              "windows, so a daily re-score barely "
+                                              "moves and just repeats the queue."),
         "min_transactions": Param(10, type="integer",
                                   description="Skip companies below this; the model "
                                               "over-flags thin accounts"),
@@ -74,6 +83,12 @@ def fds_gestun_scoring():
           SELECT DISTINCT company_id
           FROM `paper-prod.datascience_public.fds_gestung_actual_label_130826`
         ),
+        -- already in the queue recently: re-scoring adds a duplicate, not a signal
+        recently_scored AS (
+          SELECT company_id, MAX(DATE(scored_date)) AS last_scored
+          FROM `paper-prod.datascience_public.fds_gestun_scores`
+          GROUP BY company_id
+        ),
         active AS (
           SELECT company_id, COUNT(*) AS n_txn
           FROM `paper-prod.data_mart_layer.rpt__raw_data_digital_payments_daily`
@@ -86,7 +101,11 @@ def fds_gestun_scoring():
         SELECT a.company_id
         FROM active a
         LEFT JOIN labelled l USING (company_id)
+        LEFT JOIN recently_scored r USING (company_id)
         WHERE l.company_id IS NULL
+          AND (r.last_scored IS NULL
+               OR r.last_scored < DATE_SUB(CURRENT_DATE(),
+                                           INTERVAL @min_rescore_days DAY))
         ORDER BY a.n_txn DESC
         LIMIT @max_companies
         """
@@ -102,13 +121,17 @@ def fds_gestun_scoring():
                                           int(params["lookback_days"])),
             bigquery.ScalarQueryParameter("min_transactions", "INT64",
                                           int(params["min_transactions"])),
+            bigquery.ScalarQueryParameter("min_rescore_days", "INT64",
+                                          int(params["min_rescore_days"])),
             bigquery.ScalarQueryParameter("max_companies", "INT64",
                                           int(params["max_companies"])),
         ])
         frame = client.query(sql, job_config=job_config).result().to_dataframe()
         ids = frame["company_id"].astype(str).tolist()
         if not ids:
-            raise ValueError("no candidate companies -- check the source table")
+            # Normal on a quiet day once the backlog is scored: skip the rest of
+            # the run rather than failing and paging someone.
+            raise AirflowSkipException("no new candidates today")
         log.info("selected %d candidates", len(ids))
         return ids
 

@@ -140,15 +140,19 @@ and analysis; they are not on the deployment path.
 
 ## Scheduling (Airflow)
 
-`dags/fds_gestun_scoring.py` runs weekly, Mondays 03:00 Jakarta. Four tasks:
+`dags/fds_gestun_scoring.py` runs daily at 03:00 Jakarta. Four tasks:
 
 ```
 select_candidates -> build_features -> score -> publish
 ```
 
-- **select_candidates** — companies active in the last 30 days with at least 10
-  transactions, excluding anything already labelled. Scoring a company the model
-  trained on returns a fitted value, not a prediction.
+- **select_candidates** — *incremental*: companies that transacted yesterday, with
+  at least 10 transactions, excluding anything already labelled and anything
+  scored in the last 14 days. Skips the run cleanly when there is nothing new.
+
+  The incremental filter matters. The features use 7- and 30-day windows, so a
+  company re-scored the next morning produces a near-identical score. Selecting a
+  30-day window daily would put the same companies in the queue every day.
 - **build_features** — the slow step, one BigQuery job per source (~10 min per
   1k companies). Cached to `/tmp`, so a scoring failure does not force a rebuild.
 - **score** — XGBoost forward pass on the worker. Logs a warning if the flag rate
@@ -156,7 +160,13 @@ select_candidates -> build_features -> score -> publish
 - **publish** — load job into `datascience_public.fds_gestun_scores`.
 
 Everything is overridable at trigger time via DAG params: `lookback_days`,
-`min_transactions`, `threshold`, `max_companies`.
+`min_rescore_days`, `min_transactions`, `threshold`, `max_companies`. For a
+one-off backfill, widen the window:
+
+```bash
+airflow dags trigger fds_gestun_scoring \
+  --conf '{"lookback_days": 30, "min_rescore_days": 0, "max_companies": 2000}'
+```
 
 ### Worker requirements
 
@@ -180,7 +190,7 @@ bucket. For self-hosted Airflow, swap the `gsutil rsync` step for an rsync to yo
 DAG folder. Required secrets: `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`,
 `COMPOSER_DAG_BUCKET`, `COMPOSER_ENV`, `COMPOSER_REGION`.
 
-The scheduled run uses threshold **0.7**, not the 0.5 library default: out-of-fold
+The daily run uses threshold **0.7**, not the 0.5 library default: out-of-fold
 that is precision 0.932 against 0.866, which is what matters for a queue people
 actually work.
 

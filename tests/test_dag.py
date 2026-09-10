@@ -43,6 +43,29 @@ def test_threshold_default_is_the_review_queue_setting(dagbag):
     assert dag.params.dump()["threshold"] == 0.7
 
 
+def test_schedule_is_daily():
+    """Assert the configured cron from source. CronTriggerTimetable exposes no
+    stable public accessor for the expression, and coupling a test to Airflow
+    internals is how it breaks on the next upgrade."""
+    from pathlib import Path
+    source = Path("dags/fds_gestun_scoring.py").read_text()
+    assert 'schedule="0 3 * * *"' in source
+
+
+def test_dag_timezone_is_jakarta(dagbag):
+    dag = dagbag.dags["fds_gestun_scoring"]
+    assert "Jakarta" in str(dag.timezone)
+
+
+def test_daily_run_is_incremental(dagbag):
+    """A daily job that re-selects a 30-day window would rescore the same
+    companies every morning and fill the queue with duplicates."""
+    dag = dagbag.dags["fds_gestun_scoring"]
+    params = dag.params.dump()
+    assert params["lookback_days"] <= 7
+    assert params["min_rescore_days"] >= 7
+
+
 def test_thin_accounts_are_filtered_out(dagbag):
     """The model over-flags companies with almost no history, so the candidate
     query must exclude them rather than fill the queue with noise."""
