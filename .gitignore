@@ -37,3 +37,7 @@ fds_gestun_features_new13.csv
 fds_gestun_features_batch3.csv
 fds_comparison_predictions.csv
 compare_*.csv
+
+# ---- editor / backup noise ----
+*.bak
+*.bak[0-9]

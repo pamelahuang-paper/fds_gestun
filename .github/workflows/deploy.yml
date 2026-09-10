@@ -1,0 +1,49 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "fds_gestun/**"
+      - "deploy/**"
+      - "pyproject.toml"
+      - "fds_gestun_training_set.csv"
+  workflow_dispatch:
+
+env:
+  REGION: asia-southeast2
+  REPO: fds
+  IMAGE: fds-gestun
+  JOB: fds-gestun-score
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write          # keyless auth, no service-account JSON in secrets
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push
+        run: |
+          IMG="${REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${REPO}/${IMAGE}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -f deploy/Dockerfile -t "${IMG}:${GITHUB_SHA}" -t "${IMG}:latest" .
+          docker push "${IMG}:${GITHUB_SHA}"
+          docker push "${IMG}:latest"
+
+      - name: Update the Cloud Run job
+        run: |
+          IMG="${REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${REPO}/${IMAGE}"
+          gcloud run jobs update "${JOB}" \
+            --image "${IMG}:${GITHUB_SHA}" \
+            --region "${REGION}" \
+            --quiet
