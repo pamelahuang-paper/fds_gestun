@@ -1,5 +1,11 @@
 """Cross-validated evaluation. Quote the standard deviation with the mean --
-at this sample size a single split moves several points on the seed."""
+at this sample size a single split moves several points on the seed.
+
+Pipeline role : cross-validated metrics and the threshold table.
+Deploy        : not on the scoring path, but CI runs it and you need the
+                threshold table whenever the training set changes.
+Change when   : you want a different validation scheme.
+"""
 from __future__ import annotations
 import logging
 from typing import Sequence

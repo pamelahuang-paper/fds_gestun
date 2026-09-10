@@ -2,6 +2,12 @@
 
 Every query lives in sql/ and takes @company_ids, so the same code path serves
 training-set refreshes and production scoring.
+
+Pipeline role : company ids in, 184-column feature matrix out. The slow step:
+                one BigQuery job per source, ~10 min per 1k companies.
+Deploy        : REQUIRED.
+Change when   : you add a feature. Add the .sql to sql/, register it in
+                SIMPLE_SOURCES, and add a row to fds_gestun_features_179.csv.
 """
 from __future__ import annotations
 import logging

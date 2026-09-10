@@ -1,6 +1,10 @@
 """
 FDS data-cleaning helpers.
 
+LEGACY -- not on the deployment path. Nothing in fds_gestun/ imports this.
+Kept because the notes below document real defects in the upstream pipeline.
+
+
 Written against the specific problems in the FDS pipeline rather than as generic
 boilerplate. The three that matter most:
 

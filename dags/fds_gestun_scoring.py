@@ -9,6 +9,11 @@ pass, so this is light on Airflow resources. Feature building is the slow step
 
 Written for Airflow 3.x (airflow.sdk). Requires `fds-gestun` installed on the
 workers:  pip install git+ssh://git@github.com/paper-id/fds-gestun.git@main
+
+Pipeline role : the weekly schedule. Calls the package; holds no feature logic.
+Deploy        : REQUIRED, but it goes to the Airflow DAG folder, NOT into the
+                installed package.
+Change when   : the cadence, the candidate query, or the queue thresholds move.
 """
 from __future__ import annotations
 

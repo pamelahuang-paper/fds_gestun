@@ -4,6 +4,10 @@
 
     model = GestunModel.load()
     model.score(build_features(company_ids))
+
+Pipeline role : public API. `from fds_gestun import build_features, GestunModel`.
+Deploy        : REQUIRED.
+Change when   : you add something callers should reach without a deep import.
 """
 from .features import build_features, model_feature_names
 from .model import GestunModel, train, risk_band

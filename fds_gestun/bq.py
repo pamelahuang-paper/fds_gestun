@@ -1,4 +1,10 @@
-"""BigQuery access. One client, parameterised queries, no string interpolation."""
+"""BigQuery access. One client, parameterised queries, no string interpolation.
+
+Pipeline role : the only module that talks to BigQuery.
+Deploy        : REQUIRED.
+Change when   : auth changes, or you need a new query helper. Keep queries
+                parameterised -- never build SQL by string formatting.
+"""
 from __future__ import annotations
 import logging
 from functools import lru_cache

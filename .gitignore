@@ -41,3 +41,4 @@ compare_*.csv
 # ---- editor / backup noise ----
 *.bak
 *.bak[0-9]
+utils/

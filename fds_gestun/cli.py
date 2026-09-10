@@ -4,6 +4,11 @@
     fds-gestun score      --companies IDS.csv [--out OUT.csv] [--threshold 0.7]
     fds-gestun features   --companies IDS.csv --out FEATURES.csv
     fds-gestun evaluate   [--thresholds]
+
+Pipeline role : the `fds-gestun` command. Humans and CI enter here.
+Deploy        : REQUIRED (the console script points at cli:main).
+Change when   : you add a subcommand. Note the overlap guard in cmd_score --
+                it stops a company being scored by a model trained on it.
 """
 from __future__ import annotations
 import argparse

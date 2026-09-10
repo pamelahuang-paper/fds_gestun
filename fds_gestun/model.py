@@ -4,6 +4,12 @@ The saved artefact carries the feature order and the categorical level sets.
 Both matter: XGBoost positions features by index, and a category the model has
 never seen carries no information but will still be scored -- during evaluation
 one novel user_owner_name produced a +4.13 contribution on its own.
+
+Pipeline role : fit, persist, load, score. Owns the train/score dtype contract.
+Deploy        : REQUIRED.
+Change when   : you change the algorithm or what gets saved with the model.
+                Touch prepare() with care -- it is what keeps scoring aligned
+                with training, and both bugs found in testing lived there.
 """
 from __future__ import annotations
 import json
