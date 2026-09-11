@@ -140,33 +140,39 @@ and analysis; they are not on the deployment path.
 
 ## Scheduling (Airflow)
 
-`dags/fds_gestun_scoring.py` runs daily at 03:00 Jakarta. Four tasks:
+`dags/fds_gestun_scoring.py` runs weekly, Tuesdays 03:00 Jakarta. Four tasks:
 
 ```
 select_candidates -> build_features -> score -> publish
 ```
 
-- **select_candidates** — *incremental*: companies that transacted yesterday, with
-  at least 10 transactions, excluding anything already labelled and anything
-  scored in the last 14 days. Skips the run cleanly when there is nothing new.
+- **select_candidates** — every company that transacted during the run's week,
+  excluding anything already labelled. The window is Airflow's data interval, so
+  the run on Tue 11 Aug scores companies active 4–10 Aug inclusive.
 
-  The incremental filter matters. The features use 7- and 30-day windows, so a
-  company re-scored the next morning produces a near-identical score. Selecting a
-  30-day window daily would put the same companies in the queue every day.
+  It is deliberately *not* `CURRENT_DATE()`. A re-run or backfill has to score the
+  week it was meant to — re-running August in October must still score August.
+  Change the cron weekday to move the boundary: `0 3 * * 2` gives Tue–Mon weeks,
+  `0 3 * * 1` gives Mon–Sun.
+
 - **build_features** — the slow step, one BigQuery job per source (~10 min per
   1k companies). Cached to `/tmp`, so a scoring failure does not force a rebuild.
 - **score** — XGBoost forward pass on the worker. Logs a warning if the flag rate
   exceeds 50%, which means the batch does not resemble the training population.
 - **publish** — load job into `datascience_public.fds_gestun_scores`.
 
-Everything is overridable at trigger time via DAG params: `lookback_days`,
-`min_rescore_days`, `min_transactions`, `threshold`, `max_companies`. For a
-one-off backfill, widen the window:
+Overridable at trigger time: `window_start`, `window_end`, `min_transactions`,
+`min_rescore_days`, `threshold`, `max_companies`. To score a specific week by
+hand:
 
 ```bash
 airflow dags trigger fds_gestun_scoring \
-  --conf '{"lookback_days": 30, "min_rescore_days": 0, "max_companies": 2000}'
+  --conf '{"window_start": "2026-08-04", "window_end": "2026-08-10"}'
 ```
+
+`min_rescore_days` defaults to 0, so a company active in consecutive weeks is
+scored each week — that is the point of a weekly assessment. Raise it if
+reviewers start seeing repeats.
 
 ### Worker requirements
 
@@ -190,7 +196,7 @@ bucket. For self-hosted Airflow, swap the `gsutil rsync` step for an rsync to yo
 DAG folder. Required secrets: `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`,
 `COMPOSER_DAG_BUCKET`, `COMPOSER_ENV`, `COMPOSER_REGION`.
 
-The daily run uses threshold **0.7**, not the 0.5 library default: out-of-fold
+The scheduled run uses threshold **0.7**, not the 0.5 library default: out-of-fold
 that is precision 0.932 against 0.866, which is what matters for a queue people
 actually work.
 

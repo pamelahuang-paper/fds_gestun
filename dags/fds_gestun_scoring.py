@@ -1,7 +1,8 @@
-"""Daily gestun scoring.
+"""Weekly gestun scoring.
 
-Selects companies with recent activity, builds the feature matrix from BigQuery,
-scores them and lands the result in BigQuery for the review queue.
+Scores every company that transacted during the run's week. The window comes from
+Airflow's data interval, not CURRENT_DATE(), so a re-run or a backfill scores the
+same week it was meant to -- re-running August in October still scores August.
 
 The heavy work happens inside BigQuery; the worker only does the XGBoost forward
 pass, so this is light on Airflow resources. Feature building is the slow step
@@ -10,7 +11,7 @@ pass, so this is light on Airflow resources. Feature building is the slow step
 Written for Airflow 3.x (airflow.sdk). Requires `fds-gestun` installed on the
 workers:  pip install git+ssh://git@github.com/paper-id/fds-gestun.git@main
 
-Pipeline role : the daily schedule. Calls the package; holds no feature logic.
+Pipeline role : the weekly schedule. Calls the package; holds no feature logic.
 Deploy        : REQUIRED, but it goes to the Airflow DAG folder, NOT into the
                 installed package.
 Change when   : the cadence, the candidate query, or the queue thresholds move.
@@ -33,10 +34,30 @@ RESULT_TABLE = "paper-prod.datascience_public.fds_gestun_scores"
 DEFAULT_THRESHOLD = 0.7
 
 
+def resolve_window(params: dict, data_interval_start, data_interval_end
+                   ) -> tuple[str, str]:
+    """The inclusive transaction-date window for a run.
+
+    Defaults to the run's data interval. Airflow's interval end is exclusive, so
+    the last covered date is one day before it: a Tuesday-scheduled run whose
+    interval is [Tue 4 Aug 03:00, Tue 11 Aug 03:00) covers 4 Aug .. 10 Aug.
+
+    Explicit params win, so a one-off rescore of a named week needs no code change.
+    """
+    start = params.get("window_start") or data_interval_start.date().isoformat()
+    end = params.get("window_end") or data_interval_end.subtract(days=1).date().isoformat()
+    if start > end:
+        raise ValueError(f"window_start {start} is after window_end {end}")
+    return start, end
+
+
 @dag(
     dag_id="fds_gestun_scoring",
-    description="Daily gestun (credit-card cash-out) scoring",
-    schedule="0 3 * * *",                       # every day 03:00
+    description="Weekly gestun (credit-card cash-out) scoring",
+    # Tuesdays 03:00, so each run covers the preceding Tue-Mon week: the run on
+    # Tue 11 Aug scores companies that transacted 4-10 Aug. Change the weekday to
+    # move the boundary -- "0 3 * * 1" gives Mon-Sun windows instead.
+    schedule="0 3 * * 2",
     start_date=pendulum.datetime(2026, 9, 1, tz="Asia/Jakarta"),
     catchup=False,
     max_active_runs=1,
@@ -48,16 +69,20 @@ DEFAULT_THRESHOLD = 0.7
     },
     tags=["fds", "gestun", "ml"],
     params={
-        "lookback_days": Param(1, type="integer",
-                               description="Only companies that transacted in this "
-                                           "many days. 1 = yesterday's activity, "
-                                           "which is the incremental set for a "
-                                           "daily run. Widen for a backfill."),
-        "min_rescore_days": Param(14, type="integer",
+        # Leave both null to use the run's own week. Set them to score a
+        # specific window by hand, e.g. {"window_start": "2026-08-04",
+        # "window_end": "2026-08-10"}.
+        "window_start": Param(None, type=["null", "string"], format="date",
+                              description="First transaction date, inclusive. "
+                                          "Defaults to the run's data interval."),
+        "window_end": Param(None, type=["null", "string"], format="date",
+                            description="Last transaction date, inclusive."),
+        "min_rescore_days": Param(0, type="integer",
                                   description="Skip a company scored more recently "
-                                              "than this. Features use 7/30-day "
-                                              "windows, so a daily re-score barely "
-                                              "moves and just repeats the queue."),
+                                              "than this. 0 = score every active "
+                                              "company each week, which is the "
+                                              "point of a weekly assessment. Raise "
+                                              "it if reviewers see repeats."),
         "min_transactions": Param(10, type="integer",
                                   description="Skip companies below this; the model "
                                               "over-flags thin accounts"),
@@ -70,13 +95,24 @@ DEFAULT_THRESHOLD = 0.7
 def fds_gestun_scoring():
 
     @task
-    def select_candidates(params: dict) -> list[str]:
-        """Active, non-trivial companies that carry no label yet.
+    def select_candidates(params: dict, data_interval_start, data_interval_end) -> list[str]:
+        """Distinct companies that transacted during the window, excluding
+        anything already labelled.
 
         Unlabelled only: scoring a company the model trained on returns a fitted
         value, not a prediction.
+
+        The window defaults to the run's data interval. For a Monday 03:00
+        schedule the interval is [previous Mon 03:00, this Mon 03:00), so the
+        dates covered are the previous Mon through Sun -- 4-10 Aug for a run on
+        the 11th. data_interval_end is exclusive, hence the -1 day.
         """
         from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+
+        window_start, window_end = resolve_window(
+            params, data_interval_start, data_interval_end)
+        log.info("scoring companies that transacted %s .. %s (inclusive)",
+                 window_start, window_end)
 
         sql = """
         WITH labelled AS (
@@ -94,7 +130,7 @@ def fds_gestun_scoring():
           FROM `paper-prod.data_mart_layer.rpt__raw_data_digital_payments_daily`
           WHERE payment_status_name = 'PAID'
             AND DATE(transaction_created_datetime)
-                >= DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY)
+                BETWEEN @window_start AND @window_end
           GROUP BY company_id
           HAVING n_txn >= @min_transactions
         )
@@ -103,8 +139,9 @@ def fds_gestun_scoring():
         LEFT JOIN labelled l USING (company_id)
         LEFT JOIN recently_scored r USING (company_id)
         WHERE l.company_id IS NULL
-          AND (r.last_scored IS NULL
-               OR r.last_scored < DATE_SUB(CURRENT_DATE(),
+          AND (@min_rescore_days = 0
+               OR r.last_scored IS NULL
+               OR r.last_scored < DATE_SUB(@window_end,
                                            INTERVAL @min_rescore_days DAY))
         ORDER BY a.n_txn DESC
         LIMIT @max_companies
@@ -117,8 +154,8 @@ def fds_gestun_scoring():
         client = BigQueryHook(gcp_conn_id=GCP_CONN_ID, location=BQ_LOCATION,
                               use_legacy_sql=False).get_client()
         job_config = bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("lookback_days", "INT64",
-                                          int(params["lookback_days"])),
+            bigquery.ScalarQueryParameter("window_start", "DATE", window_start),
+            bigquery.ScalarQueryParameter("window_end", "DATE", window_end),
             bigquery.ScalarQueryParameter("min_transactions", "INT64",
                                           int(params["min_transactions"])),
             bigquery.ScalarQueryParameter("min_rescore_days", "INT64",
@@ -131,7 +168,8 @@ def fds_gestun_scoring():
         if not ids:
             # Normal on a quiet day once the backlog is scored: skip the rest of
             # the run rather than failing and paging someone.
-            raise AirflowSkipException("no new candidates today")
+            raise AirflowSkipException(
+                f"no candidates transacted between {window_start} and {window_end}")
         log.info("selected %d candidates", len(ids))
         return ids
 

@@ -43,13 +43,15 @@ def test_threshold_default_is_the_review_queue_setting(dagbag):
     assert dag.params.dump()["threshold"] == 0.7
 
 
-def test_schedule_is_daily():
+def test_schedule_is_weekly():
     """Assert the configured cron from source. CronTriggerTimetable exposes no
     stable public accessor for the expression, and coupling a test to Airflow
     internals is how it breaks on the next upgrade."""
+    import re
     from pathlib import Path
     source = Path("dags/fds_gestun_scoring.py").read_text()
-    assert 'schedule="0 3 * * *"' in source
+    match = re.search(r'schedule="(0 3 \* \* [1-7])"', source)
+    assert match, "expected a weekly cron on a fixed weekday"
 
 
 def test_dag_timezone_is_jakarta(dagbag):
@@ -57,13 +59,13 @@ def test_dag_timezone_is_jakarta(dagbag):
     assert "Jakarta" in str(dag.timezone)
 
 
-def test_daily_run_is_incremental(dagbag):
-    """A daily job that re-selects a 30-day window would rescore the same
-    companies every morning and fill the queue with duplicates."""
+def test_window_params_default_to_the_data_interval(dagbag):
+    """Null defaults mean the run uses its own week. A hardcoded date here would
+    pin every run to one window."""
     dag = dagbag.dags["fds_gestun_scoring"]
     params = dag.params.dump()
-    assert params["lookback_days"] <= 7
-    assert params["min_rescore_days"] >= 7
+    assert params["window_start"] is None
+    assert params["window_end"] is None
 
 
 def test_thin_accounts_are_filtered_out(dagbag):
@@ -71,3 +73,46 @@ def test_thin_accounts_are_filtered_out(dagbag):
     query must exclude them rather than fill the queue with noise."""
     dag = dagbag.dags["fds_gestun_scoring"]
     assert dag.params.dump()["min_transactions"] >= 10
+
+
+# --- the transaction-date window ------------------------------------------------
+
+def _window(params, run_day):
+    """Simulate a weekly run: Airflow's interval is the preceding 7 days."""
+    import pendulum, sys
+    sys.path.insert(0, "dags")
+    from fds_gestun_scoring import resolve_window
+    end = pendulum.parse(run_day, tz="Asia/Jakarta").at(3, 0)
+    return resolve_window(params, end.subtract(days=7), end)
+
+
+def test_window_covers_the_preceding_week():
+    """A run on Tue 11 Aug must score 4-10 Aug inclusive, not 5-11."""
+    assert _window({}, "2026-08-11") == ("2026-08-04", "2026-08-10")
+
+
+def test_window_is_seven_days_and_does_not_include_run_day():
+    import pendulum
+    start, end = _window({}, "2026-08-11")
+    assert (pendulum.parse(end) - pendulum.parse(start)).days == 6   # inclusive
+    assert end < "2026-08-11"
+
+
+def test_explicit_params_override_the_interval():
+    """Re-scoring a named week must not need a code change."""
+    override = {"window_start": "2026-07-01", "window_end": "2026-07-07"}
+    assert _window(override, "2026-08-11") == ("2026-07-01", "2026-07-07")
+
+
+def test_backwards_window_is_rejected():
+    import pytest
+    with pytest.raises(ValueError, match="after"):
+        _window({"window_start": "2026-08-10", "window_end": "2026-08-04"},
+                "2026-08-11")
+
+
+def test_window_does_not_depend_on_when_the_run_happens():
+    """CURRENT_DATE() would make an October re-run score October. The interval
+    must give the same answer whenever it executes."""
+    first = _window({}, "2026-08-11")
+    assert first == ("2026-08-04", "2026-08-10")
