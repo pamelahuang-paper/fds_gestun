@@ -30,6 +30,27 @@ GCP_CONN_ID = "google_cloud_default"
 BQ_LOCATION = "asia-southeast1"
 RESULT_TABLE = "paper-prod.datascience_public.fds_gestun_scores"
 
+# Explicit, not autodetect: autodetect infers types from whatever the first batch
+# happens to contain, so an all-null column silently becomes the wrong type.
+SCORE_SCHEMA = [
+    ("company_id", "STRING", "Company scored."),
+    ("gestun_probability", "FLOAT", "Model score 0-1. NOT calibrated to the "
+     "population base rate -- treat as a ranking, not a likelihood."),
+    ("gestun_pct", "FLOAT", "gestun_probability as a percentage."),
+    ("decision", "STRING", "GESTUN or clean, at the threshold below."),
+    ("risk_band", "STRING", "very high / high / elevated / borderline / low."),
+    ("features_present", "INTEGER", "Non-null features out of features_total. "
+     "A low count means a thin company and a less reliable score."),
+    ("features_total", "INTEGER", "Features the model expects."),
+    ("scored_date", "DATE", "Date the scoring job ran."),
+    ("window_start", "DATE", "First transaction date in the scored window."),
+    ("window_end", "DATE", "Last transaction date, inclusive. Partition key."),
+    ("threshold", "FLOAT", "Cutoff used for the decision column."),
+    ("model_trained_on", "INTEGER", "Labelled companies the model was fit on."),
+    ("model_positives", "INTEGER", "Gestun companies in that training set."),
+    ("model_features", "INTEGER", "Feature count of the model."),
+]
+
 # 0.7, not the 0.5 default. Out-of-fold that is precision 0.932 against 0.866 --
 # this output is a human review queue, so precision is the binding constraint.
 DEFAULT_THRESHOLD = 0.7
@@ -199,7 +220,8 @@ def fds_gestun_scoring():
         return str(path)
 
     @task
-    def score(features_path: str, params: dict, ds: str) -> str:
+    def score(features_path: str, params: dict, ds: str,
+              data_interval_start, data_interval_end) -> str:
         import pandas as pd
         from pathlib import Path
         from fds_gestun import GestunModel
@@ -207,8 +229,18 @@ def fds_gestun_scoring():
         model = GestunModel.load()
         frame = pd.read_csv(features_path)
         result = model.score(frame, threshold=params["threshold"])
-        result["scored_date"] = ds
+
+        # Provenance: a score is not interpretable without the window it covers,
+        # the threshold that produced the decision, and the model behind it.
+        window_start, window_end = resolve_window(
+            params, data_interval_start, data_interval_end)
+        result["scored_date"] = pd.to_datetime(ds).date()
+        result["window_start"] = pd.to_datetime(window_start).date()
+        result["window_end"] = pd.to_datetime(window_end).date()
+        result["threshold"] = float(params["threshold"])
         result["model_trained_on"] = model.trained_on
+        result["model_positives"] = model.positives
+        result["model_features"] = len(model.feature_names)
 
         path = Path(features_path).with_name("scores.csv")
         result.to_csv(path, index=False)
@@ -229,16 +261,30 @@ def fds_gestun_scoring():
 
         from google.cloud import bigquery
 
-        frame = pd.read_csv(scores_path)
+        frame = pd.read_csv(scores_path, parse_dates=["scored_date", "window_start",
+                                                      "window_end"])
+        for col in ("scored_date", "window_start", "window_end"):
+            frame[col] = frame[col].dt.date
         client = BigQueryHook(gcp_conn_id=GCP_CONN_ID, location=BQ_LOCATION).get_client()
-        # A load job, not streaming inserts: this is a batch of a few thousand rows
-        # and a load job is atomic, cheaper, and immediately queryable.
+
+        # Replace this window's rows rather than appending, so a re-run does not
+        # duplicate. Partitioned on window_end, so this prunes to one partition.
+        client.query(
+            f"DELETE FROM `{RESULT_TABLE}` WHERE window_end = @we",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter(
+                    "we", "DATE", frame.window_end.iloc[0].isoformat())]),
+        ).result()
+
+        # A load job, not streaming inserts: a batch of a few thousand rows loads
+        # atomically, costs nothing, and is immediately queryable (streamed rows
+        # sit in a buffer that DELETE cannot touch for up to 90 minutes).
         job = client.load_table_from_dataframe(
             frame, RESULT_TABLE,
             job_config=bigquery.LoadJobConfig(
+                schema=[bigquery.SchemaField(n, t, description=d)
+                        for n, t, d in SCORE_SCHEMA],
                 write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-                schema_update_options=[
-                    bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
             ),
         )
         job.result()

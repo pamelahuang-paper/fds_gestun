@@ -162,7 +162,14 @@ select_candidates -> build_features -> score -> publish
   1k companies). Cached to `/tmp`, so a scoring failure does not force a rebuild.
 - **score** — XGBoost forward pass on the worker. Logs a warning if the flag rate
   exceeds 50%, which means the batch does not resemble the training population.
-- **publish** — load job into `datascience_public.fds_gestun_scores`.
+- **publish** — load job into `datascience_public.fds_gestun_scores`, partitioned
+  on `window_end` and clustered on `decision` / `risk_band` / `company_id`.
+
+  The task deletes the window's existing rows before loading, so a re-run
+  replaces rather than duplicates. Every row carries its provenance:
+  `window_start` / `window_end`, the `threshold` that produced the decision, and
+  `model_trained_on` / `model_positives` / `model_features`. A score is not
+  interpretable without them.
 
 Overridable at trigger time: `window_start`, `window_end`, `min_transactions`,
 `min_rescore_days`, `threshold`, `max_companies`. To score a specific week by
