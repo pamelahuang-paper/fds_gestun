@@ -86,13 +86,20 @@ def _window(params, run_day):
     return resolve_window(params, end.subtract(days=7), end)
 
 
-def test_window_is_friday_to_thursday_ending_on_the_run_day():
-    """A Thursday run scores the Fri-Thu week ending that same day."""
+def test_window_is_thursday_to_wednesday_ending_the_day_before_the_run():
+    """The source mart lands H-1, so a Thursday run must not include Thursday."""
     import pendulum
     start, end = _window({}, "2026-09-17")          # a Thursday
-    assert (start, end) == ("2026-09-11", "2026-09-17")
-    assert pendulum.parse(start).format("dddd") == "Friday"
-    assert pendulum.parse(end).format("dddd") == "Thursday"
+    assert (start, end) == ("2026-09-10", "2026-09-16")
+    assert pendulum.parse(start).format("dddd") == "Thursday"
+    assert pendulum.parse(end).format("dddd") == "Wednesday"
+
+
+def test_window_never_includes_the_run_day():
+    """Including the run day would score a partial day of H-1 data."""
+    for run_day in ("2026-09-17", "2026-09-24", "2026-10-01"):
+        _, end = _window({}, run_day)
+        assert end < run_day, f"{run_day} window ends {end}"
 
 
 def test_window_is_exactly_seven_days():
@@ -125,5 +132,5 @@ def test_backwards_window_is_rejected():
 def test_window_does_not_depend_on_when_the_run_happens():
     """CURRENT_DATE() would make an October re-run score October. The window is
     derived from the run day, so a replay gives the same answer as the original."""
-    assert _window({}, "2026-09-17") == ("2026-09-11", "2026-09-17")
-    assert _window({}, "2026-08-13") == ("2026-08-07", "2026-08-13")
+    assert _window({}, "2026-09-17") == ("2026-09-10", "2026-09-16")
+    assert _window({}, "2026-08-13") == ("2026-08-06", "2026-08-12")

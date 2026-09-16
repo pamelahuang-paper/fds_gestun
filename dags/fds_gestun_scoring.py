@@ -1,6 +1,6 @@
 """Weekly gestun scoring.
 
-Scores every company that transacted during the run's Friday-to-Thursday week.
+Scores every company that transacted during the run's Thursday-to-Wednesday week.
 The window is derived from the run day, not CURRENT_DATE(), so a re-run or a
 backfill scores the week it was meant to -- re-running August in October still
 scores August.
@@ -40,21 +40,24 @@ WINDOW_DAYS = 7
 
 def resolve_window(params: dict, data_interval_start, data_interval_end
                    ) -> tuple[str, str]:
-    """The inclusive transaction-date window for a run: Friday to Thursday.
+    """The inclusive transaction-date window for a run: Thursday to Wednesday.
 
-    The window ENDS on the run day rather than the day before, because the point
-    of a Thursday run is to cover the week through Thursday. A run on Thu 17 Sep
-    scores 11 Sep (Fri) .. 17 Sep (Thu).
+    The window ends the day BEFORE the run, because the source mart lands H-1 --
+    Thursday's transactions are not in BigQuery when the Thursday job runs.
+    A run on Thu 17 Sep scores 10 Sep (Thu) .. 16 Sep (Wed).
+
+    Ending on the last complete day means no window contains partial data and
+    consecutive windows leave no gap.
 
     Derived from the run day rather than the raw interval, so the window is the
     same 7 calendar days regardless of what time the cron fires.
 
     Explicit params win, so a one-off rescore of a named week needs no code change.
     """
-    run_day = data_interval_end.date()
-    end = params.get("window_end") or run_day.isoformat()
+    last_complete_day = data_interval_end.date().subtract(days=1)
+    end = params.get("window_end") or last_complete_day.isoformat()
     start = (params.get("window_start")
-             or run_day.subtract(days=WINDOW_DAYS - 1).isoformat())
+             or last_complete_day.subtract(days=WINDOW_DAYS - 1).isoformat())
     if start > end:
         raise ValueError(f"window_start {start} is after window_end {end}")
     return start, end
@@ -63,15 +66,11 @@ def resolve_window(params: dict, data_interval_start, data_interval_end
 @dag(
     dag_id="fds_gestun_scoring",
     description="Weekly gestun (credit-card cash-out) scoring",
-    # Thursday 20:00 Jakarta. Each run scores the Friday-to-Thursday week ending
-    # that same day, so the result is on the reviewers' desk Thursday evening.
-    #
-    # The trade-off: Thursday is not over when the job runs. Transactions after
-    # 20:00 on the run day fall between windows and are never scored. That is
-    # roughly 4 hours a week. To close the gap instead, move to "0 3 * * 5"
-    # (Friday 03:00) -- same Friday-to-Thursday window, complete data, result
-    # available Friday morning rather than Thursday evening.
-    schedule="0 20 * * 4",
+    # Thursday 03:00 Jakarta. The source mart lands H-1, so the most recent
+    # complete day on a Thursday morning is Wednesday: each run scores the
+    # Thursday-to-Wednesday week ending the day before it fires. Result is ready
+    # for Thursday's working day, and no window contains a partial day.
+    schedule="0 3 * * 4",
     start_date=pendulum.datetime(2026, 9, 1, tz="Asia/Jakarta"),
     catchup=False,
     max_active_runs=1,
@@ -116,8 +115,8 @@ def fds_gestun_scoring():
         Unlabelled only: scoring a company the model trained on returns a fitted
         value, not a prediction.
 
-        The window is the Friday-to-Thursday week ending on the run day: a run
-        on Thu 17 Sep scores companies that transacted 11-17 Sep inclusive.
+        The window is the Thursday-to-Wednesday week ending the day before the
+        run: a run on Thu 17 Sep scores companies that transacted 10-16 Sep.
         """
         from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 

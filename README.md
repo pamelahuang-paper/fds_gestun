@@ -140,25 +140,23 @@ and analysis; they are not on the deployment path.
 
 ## Scheduling (Airflow)
 
-`dags/fds_gestun_scoring.py` runs weekly, Thursdays 20:00 Jakarta. Four tasks:
+`dags/fds_gestun_scoring.py` runs weekly, Thursdays 03:00 Jakarta. Four tasks:
 
 ```
 select_candidates -> build_features -> score -> publish
 ```
 
 - **select_candidates** — every company that transacted during the run's
-  Friday-to-Thursday week, excluding anything already labelled. A run on Thu
-  17 Sep scores companies active 11–17 Sep inclusive.
+  Thursday-to-Wednesday week, excluding anything already labelled. A run on Thu
+  17 Sep scores companies active 10–16 Sep inclusive.
+
+  The window ends the day **before** the run because the source mart lands H-1:
+  Thursday's transactions are not in BigQuery when the Thursday job fires. That
+  means no window ever contains a partial day, and consecutive windows leave no
+  gap — both are asserted in the tests.
 
   The window is derived from the run day, not `CURRENT_DATE()`, so a re-run or a
-  backfill scores the week it was meant to. Consecutive windows neither overlap
-  nor skip a day — there is a test for that.
-
-  **Known gap:** the run fires at 20:00 on the Thursday it covers, so
-  transactions after 20:00 that day fall between windows and are never scored —
-  about four hours a week. That is the price of having the answer on Thursday.
-  To close it, change the schedule to `0 3 * * 5`: same Friday-to-Thursday
-  window, complete data, result Friday morning instead.
+  backfill scores the week it was meant to.
 
 - **build_features** — the slow step, one BigQuery job per source (~10 min per
   1k companies). Cached to `/tmp`, so a scoring failure does not force a rebuild.
@@ -172,7 +170,7 @@ hand:
 
 ```bash
 airflow dags trigger fds_gestun_scoring \
-  --conf '{"window_start": "2026-09-11", "window_end": "2026-09-17"}'
+  --conf '{"window_start": "2026-09-10", "window_end": "2026-09-16"}'
 ```
 
 `min_rescore_days` defaults to 0, so a company active in consecutive weeks is
