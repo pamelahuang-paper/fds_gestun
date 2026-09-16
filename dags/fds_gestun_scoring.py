@@ -1,8 +1,9 @@
 """Weekly gestun scoring.
 
-Scores every company that transacted during the run's week. The window comes from
-Airflow's data interval, not CURRENT_DATE(), so a re-run or a backfill scores the
-same week it was meant to -- re-running August in October still scores August.
+Scores every company that transacted during the run's Friday-to-Thursday week.
+The window is derived from the run day, not CURRENT_DATE(), so a re-run or a
+backfill scores the week it was meant to -- re-running August in October still
+scores August.
 
 The heavy work happens inside BigQuery; the worker only does the XGBoost forward
 pass, so this is light on Airflow resources. Feature building is the slow step
@@ -34,18 +35,26 @@ RESULT_TABLE = "paper-prod.datascience_public.fds_gestun_scores"
 DEFAULT_THRESHOLD = 0.7
 
 
+WINDOW_DAYS = 7
+
+
 def resolve_window(params: dict, data_interval_start, data_interval_end
                    ) -> tuple[str, str]:
-    """The inclusive transaction-date window for a run.
+    """The inclusive transaction-date window for a run: Friday to Thursday.
 
-    Defaults to the run's data interval. Airflow's interval end is exclusive, so
-    the last covered date is one day before it: a Tuesday-scheduled run whose
-    interval is [Tue 4 Aug 03:00, Tue 11 Aug 03:00) covers 4 Aug .. 10 Aug.
+    The window ENDS on the run day rather than the day before, because the point
+    of a Thursday run is to cover the week through Thursday. A run on Thu 17 Sep
+    scores 11 Sep (Fri) .. 17 Sep (Thu).
+
+    Derived from the run day rather than the raw interval, so the window is the
+    same 7 calendar days regardless of what time the cron fires.
 
     Explicit params win, so a one-off rescore of a named week needs no code change.
     """
-    start = params.get("window_start") or data_interval_start.date().isoformat()
-    end = params.get("window_end") or data_interval_end.subtract(days=1).date().isoformat()
+    run_day = data_interval_end.date()
+    end = params.get("window_end") or run_day.isoformat()
+    start = (params.get("window_start")
+             or run_day.subtract(days=WINDOW_DAYS - 1).isoformat())
     if start > end:
         raise ValueError(f"window_start {start} is after window_end {end}")
     return start, end
@@ -54,10 +63,15 @@ def resolve_window(params: dict, data_interval_start, data_interval_end
 @dag(
     dag_id="fds_gestun_scoring",
     description="Weekly gestun (credit-card cash-out) scoring",
-    # Tuesdays 03:00, so each run covers the preceding Tue-Mon week: the run on
-    # Tue 11 Aug scores companies that transacted 4-10 Aug. Change the weekday to
-    # move the boundary -- "0 3 * * 1" gives Mon-Sun windows instead.
-    schedule="0 3 * * 2",
+    # Thursday 20:00 Jakarta. Each run scores the Friday-to-Thursday week ending
+    # that same day, so the result is on the reviewers' desk Thursday evening.
+    #
+    # The trade-off: Thursday is not over when the job runs. Transactions after
+    # 20:00 on the run day fall between windows and are never scored. That is
+    # roughly 4 hours a week. To close the gap instead, move to "0 3 * * 5"
+    # (Friday 03:00) -- same Friday-to-Thursday window, complete data, result
+    # available Friday morning rather than Thursday evening.
+    schedule="0 20 * * 4",
     start_date=pendulum.datetime(2026, 9, 1, tz="Asia/Jakarta"),
     catchup=False,
     max_active_runs=1,
@@ -102,10 +116,8 @@ def fds_gestun_scoring():
         Unlabelled only: scoring a company the model trained on returns a fitted
         value, not a prediction.
 
-        The window defaults to the run's data interval. For a Monday 03:00
-        schedule the interval is [previous Mon 03:00, this Mon 03:00), so the
-        dates covered are the previous Mon through Sun -- 4-10 Aug for a run on
-        the 11th. data_interval_end is exclusive, hence the -1 day.
+        The window is the Friday-to-Thursday week ending on the run day: a run
+        on Thu 17 Sep scores companies that transacted 11-17 Sep inclusive.
         """
         from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 

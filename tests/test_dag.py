@@ -43,15 +43,15 @@ def test_threshold_default_is_the_review_queue_setting(dagbag):
     assert dag.params.dump()["threshold"] == 0.7
 
 
-def test_schedule_is_weekly():
+def test_schedule_is_weekly_on_thursday():
     """Assert the configured cron from source. CronTriggerTimetable exposes no
     stable public accessor for the expression, and coupling a test to Airflow
     internals is how it breaks on the next upgrade."""
     import re
     from pathlib import Path
     source = Path("dags/fds_gestun_scoring.py").read_text()
-    match = re.search(r'schedule="(0 3 \* \* [1-7])"', source)
-    assert match, "expected a weekly cron on a fixed weekday"
+    match = re.search(r'schedule="0 \d+ \* \* 4"', source)
+    assert match, "expected a weekly cron on Thursday (day 4)"
 
 
 def test_dag_timezone_is_jakarta(dagbag):
@@ -86,16 +86,27 @@ def _window(params, run_day):
     return resolve_window(params, end.subtract(days=7), end)
 
 
-def test_window_covers_the_preceding_week():
-    """A run on Tue 11 Aug must score 4-10 Aug inclusive, not 5-11."""
-    assert _window({}, "2026-08-11") == ("2026-08-04", "2026-08-10")
-
-
-def test_window_is_seven_days_and_does_not_include_run_day():
+def test_window_is_friday_to_thursday_ending_on_the_run_day():
+    """A Thursday run scores the Fri-Thu week ending that same day."""
     import pendulum
-    start, end = _window({}, "2026-08-11")
-    assert (pendulum.parse(end) - pendulum.parse(start)).days == 6   # inclusive
-    assert end < "2026-08-11"
+    start, end = _window({}, "2026-09-17")          # a Thursday
+    assert (start, end) == ("2026-09-11", "2026-09-17")
+    assert pendulum.parse(start).format("dddd") == "Friday"
+    assert pendulum.parse(end).format("dddd") == "Thursday"
+
+
+def test_window_is_exactly_seven_days():
+    import pendulum
+    start, end = _window({}, "2026-09-17")
+    assert (pendulum.parse(end) - pendulum.parse(start)).days + 1 == 7
+
+
+def test_consecutive_windows_do_not_overlap_or_skip_a_day():
+    """Every transaction day must land in exactly one window."""
+    import pendulum
+    _, end_1 = _window({}, "2026-09-17")
+    start_2, _ = _window({}, "2026-09-24")
+    assert pendulum.parse(start_2) == pendulum.parse(end_1).add(days=1)
 
 
 def test_explicit_params_override_the_interval():
@@ -112,7 +123,7 @@ def test_backwards_window_is_rejected():
 
 
 def test_window_does_not_depend_on_when_the_run_happens():
-    """CURRENT_DATE() would make an October re-run score October. The interval
-    must give the same answer whenever it executes."""
-    first = _window({}, "2026-08-11")
-    assert first == ("2026-08-04", "2026-08-10")
+    """CURRENT_DATE() would make an October re-run score October. The window is
+    derived from the run day, so a replay gives the same answer as the original."""
+    assert _window({}, "2026-09-17") == ("2026-09-11", "2026-09-17")
+    assert _window({}, "2026-08-13") == ("2026-08-07", "2026-08-13")
