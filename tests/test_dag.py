@@ -55,14 +55,16 @@ def test_freshness_gate_runs_before_any_work(dagbag):
     assert "select_candidates" in gate.downstream_task_ids
 
 
-def test_schedule_runs_after_the_daily_rebuild():
-    """Measured 2026-09-16: the rebuild lands ~15:41 WIB. A morning run would
-    read a Wednesday that is ~90% missing."""
+def test_schedule_runs_after_the_daily_source_load():
+    """The daily load finishes ~05:15 WIB and completes the previous day.
+    Observed range 2026-09-03..16 was 04:25-06:38, so the run needs headroom
+    past the latest, not the median."""
     import re
     from pathlib import Path
     source = Path("dags/fds_gestun_scoring.py").read_text()
     hour = int(re.search(r'schedule="0 (\d+) \* \* 4"', source).group(1))
-    assert hour >= 16, f"schedule fires at {hour}:00, before the ~15:41 rebuild"
+    assert hour >= 7, (f"schedule fires at {hour}:00; the source load has been "
+                       f"seen finishing as late as 06:38")
 
 
 def test_schedule_is_weekly_on_thursday():

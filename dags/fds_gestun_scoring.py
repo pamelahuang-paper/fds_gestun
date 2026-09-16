@@ -91,21 +91,21 @@ def resolve_window(params: dict, data_interval_start, data_interval_end
 @dag(
     dag_id="fds_gestun_scoring",
     description="Weekly gestun (credit-card cash-out) scoring",
-    # Thursday 17:00 Jakarta, NOT the morning.
+    # Thursday 08:00 Jakarta.
     #
-    # Measured 2026-09-16: the mart is fully rewritten once a day around 15:41
-    # WIB, and that rebuild only carries the current day up to ~01:30. So a given
-    # day is complete in the mart only AFTER the following day's rebuild.
+    # Measured from INFORMATION_SCHEMA.JOBS over 2026-09-03..16: the daily load
+    # of rpt__raw_data_digital_payments_daily finishes around 05:15 WIB, and that
+    # load is what completes the PREVIOUS day. Observed finish times ranged 04:25
+    # to 06:38, so the spread matters more than the median -- 08:00 leaves ~1h20m
+    # of headroom past the latest seen.
     #
-    # At 03:00 on a Thursday the newest rebuild is Wednesday's, which holds about
-    # 90 minutes of Wednesday. Scoring then would silently treat a near-empty
-    # Wednesday as a full day. 17:00 sits after the Thursday rebuild, so the
-    # Thursday-to-Wednesday window is complete, and the result is still ready
-    # within Thursday.
+    # Occasional extra runs appear later in the day (15:41 on the 16th, 16:52 on
+    # the 14th). Those are ad-hoc, not the schedule; do not size against them.
     #
-    # assert_source_is_fresh() below enforces this rather than trusting it: if
-    # the rebuild slips, the run fails loudly instead of scoring a partial week.
-    schedule="0 17 * * 4",
+    # assert_source_is_fresh() enforces the property rather than trusting the
+    # cadence: if the load slips past 08:00, the run fails loudly instead of
+    # scoring a partial week.
+    schedule="0 8 * * 4",
     start_date=pendulum.datetime(2026, 9, 1, tz="Asia/Jakarta"),
     catchup=False,
     max_active_runs=1,
