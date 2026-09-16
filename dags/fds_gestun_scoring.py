@@ -58,6 +58,10 @@ DEFAULT_THRESHOLD = 0.7
 
 WINDOW_DAYS = 7
 
+# A fully-loaded day spans all 24 hours. 22 leaves room for a genuinely quiet
+# hour without accepting a half-loaded partition.
+MIN_HOURS_FOR_COMPLETE_DAY = 22
+
 
 def resolve_window(params: dict, data_interval_start, data_interval_end
                    ) -> tuple[str, str]:
@@ -87,11 +91,21 @@ def resolve_window(params: dict, data_interval_start, data_interval_end
 @dag(
     dag_id="fds_gestun_scoring",
     description="Weekly gestun (credit-card cash-out) scoring",
-    # Thursday 03:00 Jakarta. The source mart lands H-1, so the most recent
-    # complete day on a Thursday morning is Wednesday: each run scores the
-    # Thursday-to-Wednesday week ending the day before it fires. Result is ready
-    # for Thursday's working day, and no window contains a partial day.
-    schedule="0 3 * * 4",
+    # Thursday 17:00 Jakarta, NOT the morning.
+    #
+    # Measured 2026-09-16: the mart is fully rewritten once a day around 15:41
+    # WIB, and that rebuild only carries the current day up to ~01:30. So a given
+    # day is complete in the mart only AFTER the following day's rebuild.
+    #
+    # At 03:00 on a Thursday the newest rebuild is Wednesday's, which holds about
+    # 90 minutes of Wednesday. Scoring then would silently treat a near-empty
+    # Wednesday as a full day. 17:00 sits after the Thursday rebuild, so the
+    # Thursday-to-Wednesday window is complete, and the result is still ready
+    # within Thursday.
+    #
+    # assert_source_is_fresh() below enforces this rather than trusting it: if
+    # the rebuild slips, the run fails loudly instead of scoring a partial week.
+    schedule="0 17 * * 4",
     start_date=pendulum.datetime(2026, 9, 1, tz="Asia/Jakarta"),
     catchup=False,
     max_active_runs=1,
@@ -127,6 +141,45 @@ def resolve_window(params: dict, data_interval_start, data_interval_end
     },
 )
 def fds_gestun_scoring():
+
+    @task
+    def assert_source_is_fresh(params: dict, data_interval_start, data_interval_end) -> str:
+        """Fail before doing any work if the mart has not caught up.
+
+        The schedule assumes a daily rebuild lands the previous day in full. That
+        assumption is worth one cheap query: a silently truncated window produces
+        a plausible-looking queue built on a fraction of the week, which is far
+        worse than a failed run.
+        """
+        from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+        from google.cloud import bigquery
+
+        _, window_end = resolve_window(params, data_interval_start, data_interval_end)
+        client = BigQueryHook(gcp_conn_id=GCP_CONN_ID, location=BQ_LOCATION,
+                              use_legacy_sql=False).get_client()
+        row = list(client.query(
+            """
+            SELECT MAX(TIME(transaction_created_datetime)) AS last_txn,
+                   COUNT(DISTINCT EXTRACT(HOUR FROM transaction_created_datetime)) AS hours,
+                   COUNT(*) AS n_txn
+            FROM `paper-prod.data_mart_layer.rpt__raw_data_digital_payments_daily`
+            WHERE DATE(transaction_created_datetime) = @we
+            """,
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("we", "DATE", window_end)]),
+        ).result())[0]
+
+        log.info("%s in the mart: %s transactions, %s hours covered, last at %s",
+                 window_end, row.n_txn, row.hours, row.last_txn)
+        # A complete day spans essentially all 24 hours. Anything less means the
+        # rebuild has not run yet, or ran early.
+        if row.n_txn == 0 or row.hours < MIN_HOURS_FOR_COMPLETE_DAY:
+            raise ValueError(
+                f"{window_end} is incomplete in the mart: {row.n_txn} transactions "
+                f"across {row.hours} hours (last at {row.last_txn}). The daily "
+                f"rebuild has not landed it yet. Retry after it does, or move the "
+                f"schedule later.")
+        return window_end
 
     @task
     def select_candidates(params: dict, data_interval_start, data_interval_end) -> list[str]:
@@ -296,7 +349,9 @@ def fds_gestun_scoring():
         log.info("published to %s: %s", RESULT_TABLE, summary)
         return summary
 
+    fresh = assert_source_is_fresh()
     candidates = select_candidates()
+    fresh >> candidates          # no work until the source is known complete
     features = build_features(candidates)
     scores = score(features)
     publish(scores)

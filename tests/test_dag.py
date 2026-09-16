@@ -21,9 +21,11 @@ def test_dag_is_registered(dagbag):
 def test_task_graph_is_linear_and_complete(dagbag):
     dag = dagbag.dags["fds_gestun_scoring"]
     assert {t.task_id for t in dag.tasks} == {
-        "select_candidates", "build_features", "score", "publish"}
+        "assert_source_is_fresh", "select_candidates", "build_features",
+        "score", "publish"}
     upstream = {t.task_id: sorted(t.upstream_task_ids) for t in dag.tasks}
-    assert upstream["select_candidates"] == []
+    assert upstream["assert_source_is_fresh"] == []
+    assert upstream["select_candidates"] == ["assert_source_is_fresh"]
     assert upstream["build_features"] == ["select_candidates"]
     assert upstream["score"] == ["build_features"]
     assert upstream["publish"] == ["score"]
@@ -41,6 +43,26 @@ def test_threshold_default_is_the_review_queue_setting(dagbag):
     dag = dagbag.dags["fds_gestun_scoring"]
     # Airflow 3 resolves dag.params[...] to the value, not the Param object.
     assert dag.params.dump()["threshold"] == 0.7
+
+
+def test_freshness_gate_runs_before_any_work(dagbag):
+    """The mart rebuilds once a day and a given day is only complete after the
+    NEXT day's rebuild. Scoring before that silently uses a fraction of the week,
+    which is worse than failing."""
+    dag = dagbag.dags["fds_gestun_scoring"]
+    gate = dag.get_task("assert_source_is_fresh")
+    assert gate.upstream_task_ids == set(), "the gate must run first"
+    assert "select_candidates" in gate.downstream_task_ids
+
+
+def test_schedule_runs_after_the_daily_rebuild():
+    """Measured 2026-09-16: the rebuild lands ~15:41 WIB. A morning run would
+    read a Wednesday that is ~90% missing."""
+    import re
+    from pathlib import Path
+    source = Path("dags/fds_gestun_scoring.py").read_text()
+    hour = int(re.search(r'schedule="0 (\d+) \* \* 4"', source).group(1))
+    assert hour >= 16, f"schedule fires at {hour}:00, before the ~15:41 rebuild"
 
 
 def test_schedule_is_weekly_on_thursday():

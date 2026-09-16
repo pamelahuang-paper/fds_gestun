@@ -1,9 +1,8 @@
-"""Configuration. Everything environment-specific lives here or in env vars.
-
-Pipeline role : every setting, read from env vars with sane defaults.
-Deploy        : REQUIRED. Nothing else hardcodes a path, project or threshold.
-Change when   : you move projects, retune the model, or move the decision
-                threshold. Prefer setting the env var over editing defaults.
+"""
+Project: FDS GESTUN
+Owner: Pamela Huang (Risk)
+Created: September 2026
+Description: For configuration purpose
 """
 from __future__ import annotations
 import os
