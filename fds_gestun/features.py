@@ -160,3 +160,24 @@ def model_feature_names() -> list[str]:
         "company_id", "is_gestun"}
     base = [f for f in dictionary.feature if f not in excluded]
     return base + [f for f in config.PTCV_FEATURES if f not in base]
+
+
+def build_transaction_detail(company_ids: Sequence[str], window_start: str,
+                             window_end: str) -> pd.DataFrame:
+    """One row per transaction for the given companies and window.
+
+    This is NOT a transaction-level model. The label is company-grain and so is
+    the model; these rows carry per-transaction *attributes* (amount, payee,
+    round-number and self-dealing flags) so a reviewer working a flagged company
+    knows which transactions to open first. The company's score is joined on by
+    the caller and is identical across that company's rows.
+    """
+    ids = _dedupe(company_ids)
+    if not ids:
+        raise ValueError("company_ids is empty")
+    frame = bq.run_query(bq.load_sql("transactions_for_review.sql"),
+                         company_ids=ids,
+                         window_start=window_start, window_end=window_end)
+    log.info("transaction detail %s for %s .. %s", frame.shape,
+             window_start, window_end)
+    return frame

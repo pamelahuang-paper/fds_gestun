@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import pendulum
-from airflow.exceptions import AirflowSkipException
+from airflow.sdk.exceptions import AirflowSkipException
 from airflow.sdk import Param, dag, task
 
 log = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 GCP_CONN_ID = "google_cloud_default"
 BQ_LOCATION = "asia-southeast1"
 RESULT_TABLE = "paper-prod.datascience_public.fds_gestun_scores"
+TXN_TABLE = "paper-prod.datascience_public.fds_gestun_scores_txn"
 
 # Explicit, not autodetect: autodetect infers types from whatever the first batch
 # happens to contain, so an all-null column silently becomes the wrong type.
@@ -49,6 +50,44 @@ SCORE_SCHEMA = [
     ("model_trained_on", "INTEGER", "Labelled companies the model was fit on."),
     ("model_positives", "INTEGER", "Gestun companies in that training set."),
     ("model_features", "INTEGER", "Feature count of the model."),
+]
+
+# Transaction detail for the companies that were scored. The model is
+# company-grain, so company_gestun_probability is the COMPANY's score repeated on
+# each of its rows -- it does not rank transactions against each other. The
+# per-transaction columns are triage attributes, not predictions.
+TXN_SCHEMA = [
+    ("company_id", "STRING", "Company the transaction belongs to."),
+    ("digital_payment_id", "STRING", "Transaction identifier."),
+    ("order_id", "STRING", "Order identifier."),
+    ("transaction_created_datetime", "DATETIME", "When the transaction was created."),
+    ("transaction_date", "DATE", "Transaction date."),
+    ("transaction_amount", "FLOAT", "Transaction amount."),
+    ("partner_id", "STRING", "Payee identifier."),
+    ("partner_name", "STRING", "Payee name as entered."),
+    ("direction", "STRING", "In or Out. Gestun is an outbound pattern, so Out is the direction that matters."),
+    ("payment_method_name", "STRING", "Payment method."),
+    ("partner_is_ptcv", "INTEGER", "Payee name contains PT/CV/UD/Tbk etc. A "
+     "registered payee leans CLEAN -- cleared companies pay them 3x more often."),
+    ("partner_is_single_word", "INTEGER", "Payee is one word once legal forms are "
+     "stripped. The strongest confirmed name signal: 31% of flagged companies' "
+     "transactions against 10% of cleared."),
+    ("partner_matches_company", "INTEGER", "Payee name equals the company, its "
+     "owner, or its registered bank owner -- paying itself."),
+    ("amount_is_round_1m", "INTEGER", "Amount is a whole million."),
+    ("amount_is_round_100k", "INTEGER", "Amount is a whole hundred thousand."),
+    ("hour_of_day", "INTEGER", "Hour the transaction was created."),
+    ("is_offhours", "INTEGER", "Before 08:00 or from 20:00. Weak in practice -- "
+     "near-identical between flagged and cleared companies."),
+    ("amount_rank_in_company", "INTEGER", "1 = this company's largest transaction "
+     "in the window. Open these first."),
+    ("company_gestun_probability", "FLOAT", "The COMPANY's score, repeated on every "
+     "row for that company. NOT a per-transaction prediction and NOT calibrated."),
+    ("company_decision", "STRING", "GESTUN or clean, for the company."),
+    ("company_risk_band", "STRING", "Risk band, for the company."),
+    ("scored_date", "DATE", "Date the scoring job ran."),
+    ("window_start", "DATE", "First transaction date in the scored window."),
+    ("window_end", "DATE", "Last transaction date, inclusive. Partition key."),
 ]
 
 # 0.7, not the 0.5 default. Out-of-fold that is precision 0.932 against 0.866 --
@@ -349,12 +388,66 @@ def fds_gestun_scoring():
         log.info("published to %s: %s", RESULT_TABLE, summary)
         return summary
 
+    @task
+    def publish_transactions(scores_path: str, ds: str, params: dict,
+                             data_interval_start, data_interval_end) -> dict:
+        """Second output: one row per transaction for the scored companies.
+
+        Reviewers work companies, but they open transactions. This gives them the
+        amount, the payee and the triage flags so they start with the right ones.
+        Independent of publish(), so a failure here does not lose the company
+        scores.
+        """
+        import pandas as pd
+        from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+        from google.cloud import bigquery
+        from fds_gestun import build_transaction_detail
+
+        scores = pd.read_csv(scores_path)
+        scores = scores[scores.risk_band != "known label"]
+        window_start, window_end = resolve_window(
+            params, data_interval_start, data_interval_end)
+
+        txn = build_transaction_detail(scores.company_id.tolist(),
+                                       window_start, window_end)
+        txn = txn.merge(
+            scores[["company_id", "gestun_probability", "decision", "risk_band"]]
+            .rename(columns={"gestun_probability": "company_gestun_probability",
+                             "decision": "company_decision",
+                             "risk_band": "company_risk_band"}),
+            on="company_id", how="left")
+        txn["scored_date"] = pd.to_datetime(ds).date()
+        txn["window_start"] = pd.to_datetime(window_start).date()
+        txn["window_end"] = pd.to_datetime(window_end).date()
+        txn = txn[[n for n, _, _ in TXN_SCHEMA]]
+
+        client = BigQueryHook(gcp_conn_id=GCP_CONN_ID, location=BQ_LOCATION).get_client()
+        client.query(
+            f"DELETE FROM `{TXN_TABLE}` WHERE window_end = @we",
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("we", "DATE", window_end)]),
+        ).result()
+        client.load_table_from_dataframe(
+            txn, TXN_TABLE,
+            job_config=bigquery.LoadJobConfig(
+                schema=[bigquery.SchemaField(n, t, description=d)
+                        for n, t, d in TXN_SCHEMA],
+                write_disposition=bigquery.WriteDisposition.WRITE_APPEND),
+        ).result()
+
+        summary = {"transactions": len(txn),
+                   "for_flagged_companies":
+                       int((txn.company_decision == "GESTUN").sum())}
+        log.info("published to %s: %s", TXN_TABLE, summary)
+        return summary
+
     fresh = assert_source_is_fresh()
     candidates = select_candidates()
     fresh >> candidates          # no work until the source is known complete
     features = build_features(candidates)
     scores = score(features)
-    publish(scores)
+    publish(scores)                  # company grain
+    publish_transactions(scores)     # transaction grain
 
 
 fds_gestun_scoring()

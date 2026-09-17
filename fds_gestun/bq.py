@@ -47,9 +47,22 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# BigQuery type for each extra scalar parameter a query may declare. Explicit,
+# because inferring DATE from a string would silently pass it as STRING.
+SCALAR_PARAM_TYPES = {
+    "window_start": "DATE",
+    "window_end": "DATE",
+    "min_transactions": "INT64",
+    "min_rescore_days": "INT64",
+    "max_companies": "INT64",
+}
+
+
 def run_query(sql: str, *, company_ids: Sequence[str] | None = None,
-              pool_ids: Sequence[str] | None = None) -> pd.DataFrame:
-    """Run a query with array parameters and return a numeric-coerced DataFrame."""
+              pool_ids: Sequence[str] | None = None, **scalars) -> pd.DataFrame:
+    """Run a query with array and scalar parameters, returning a numeric-coerced
+    DataFrame. Scalar names must appear in SCALAR_PARAM_TYPES so the BigQuery
+    type is declared rather than guessed."""
     params = []
     if company_ids is not None:
         params.append(bigquery.ArrayQueryParameter("company_ids", "STRING",
@@ -57,6 +70,13 @@ def run_query(sql: str, *, company_ids: Sequence[str] | None = None,
     if pool_ids is not None:
         params.append(bigquery.ArrayQueryParameter("pool_ids", "STRING",
                                                    list(pool_ids)))
+    for name, value in scalars.items():
+        if name not in SCALAR_PARAM_TYPES:
+            raise ValueError(
+                f"unknown query parameter {name!r}; add it to SCALAR_PARAM_TYPES "
+                f"with its BigQuery type")
+        params.append(bigquery.ScalarQueryParameter(
+            name, SCALAR_PARAM_TYPES[name], value))
     job_config = bigquery.QueryJobConfig(
         query_parameters=params,
         maximum_bytes_billed=config.BQ_MAX_BYTES_BILLED,

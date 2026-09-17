@@ -22,13 +22,14 @@ def test_task_graph_is_linear_and_complete(dagbag):
     dag = dagbag.dags["fds_gestun_scoring"]
     assert {t.task_id for t in dag.tasks} == {
         "assert_source_is_fresh", "select_candidates", "build_features",
-        "score", "publish"}
+        "score", "publish", "publish_transactions"}
     upstream = {t.task_id: sorted(t.upstream_task_ids) for t in dag.tasks}
     assert upstream["assert_source_is_fresh"] == []
     assert upstream["select_candidates"] == ["assert_source_is_fresh"]
     assert upstream["build_features"] == ["select_candidates"]
     assert upstream["score"] == ["build_features"]
     assert upstream["publish"] == ["score"]
+    assert upstream["publish_transactions"] == ["score"]
 
 
 def test_backfill_is_off(dagbag):
@@ -214,3 +215,29 @@ def test_probability_column_warns_it_is_not_calibrated():
     from fds_gestun_scoring import SCORE_SCHEMA
     desc = dict((n, d) for n, _, d in SCORE_SCHEMA)["gestun_probability"]
     assert "calibrat" in desc.lower() and "ranking" in desc.lower()
+
+
+def test_the_two_publishes_are_independent(dagbag):
+    """Transaction detail failing must not lose the company scores, and vice
+    versa. They fan out from score() rather than chaining."""
+    dag = dagbag.dags["fds_gestun_scoring"]
+    assert "publish_transactions" not in dag.get_task("publish").downstream_task_ids
+    assert "publish" not in dag.get_task("publish_transactions").downstream_task_ids
+
+
+def test_transaction_score_column_says_it_is_the_company_score():
+    """The single most misreadable column in the transaction table: someone will
+    otherwise read it as a per-transaction risk."""
+    import sys
+    sys.path.insert(0, "dags")
+    from fds_gestun_scoring import TXN_SCHEMA
+    desc = dict((n, d) for n, _, d in TXN_SCHEMA)["company_gestun_probability"]
+    assert "COMPANY" in desc and "NOT a per-transaction" in desc
+
+
+def test_transaction_schema_is_documented():
+    import sys
+    sys.path.insert(0, "dags")
+    from fds_gestun_scoring import TXN_SCHEMA
+    for name, _, description in TXN_SCHEMA:
+        assert description and len(description) > 10, f"{name} has no description"
