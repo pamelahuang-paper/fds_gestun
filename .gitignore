@@ -1,44 +1,97 @@
-# ---- SECRETS: never commit ----------------------------------------------
-utils/risk_creds.py
+# --- credentials -----------------------------------------------------------
+# utils/ holds plaintext production credentials for ArangoDB and MySQL. It must
+# never be committed, and the credentials in it should be rotated; see README.
+utils/
+*.json.key
 *credential*
 *secret*
 .env
-*.pem
-*.p12
+.env.*
+!.env.example
+service-account*.json
 
-# ---- large data: rebuild from BigQuery, do not version -------------------
+# --- run outputs -----------------------------------------------------------
+# Every scored week writes <prefix>_candidates/_features/_scores/_review_queue.
+# They are reproducible from BigQuery, carry customer names and owner names, and
+# one week of features is ~6 MB. The published copy lives in
+# datascience_public.fds_gestun_scores, not here.
+*_candidates.csv
+*_candidates_meta.csv
+*_features.csv
+*_scores.csv
+*_scores_raw.csv
+*_scores_min10txn.csv
+*_review_queue.csv
+*_transactions.csv
+*_truth.csv
+*_comparison.csv
+*_invoice_match.csv
+*_invoice_mismatch.csv
+*_old_model_company.csv
+week_*.csv
+sep*.csv
+oct*.csv
+nov*.csv
+dec*.csv
+
+# Keep the three files the package and the deploy actually need. Negations come
+# after the broad rules above, or git ignores them anyway.
+!fds_gestun_training_set.csv
+!fds_gestun_features_179.csv
+!fds_gestun_feature_dictionary.csv
+
+# --- other data ------------------------------------------------------------
 *.parquet
-artifacts-final/
+*.pkl
+*.p
+*.xlsx
+*.docx
+*.bak
+*.bak[0-9]
+FDS_features.csv
+fds_comparison*.csv
+fds_gestun_features_*.csv
+!fds_gestun_features_179.csv
+fds_gestun_predictions_*.csv
+fds_gestun_ptcv_partner.csv
+fds_gestun_training_clean_ids.csv
+fds_training_set_gestun_columns.csv
+features_*.csv
+gestun_*.csv
+new_labels_*.csv
+review_queue_*.csv
+compare_*.csv
 
-# ---- build artefacts: CI rebuilds these ---------------------------------
+# --- notebooks -------------------------------------------------------------
+# Exploration, and their saved outputs render DataFrames containing real owner
+# and cardholder names. The package and fds_gestun/sql/*.sql are the source of
+# truth; see README for where the notebooks live.
+*.ipynb
+.ipynb_checkpoints/
+
+# --- model artifacts -------------------------------------------------------
+# Rebuilt by `fds-gestun train` (~75s, no BigQuery). The DAG's ensure_model task
+# trains on the worker, so no artifact is shipped.
 artifacts/
+artifacts-final/
 build/
-dist/
 *.egg-info/
+
+# --- python ----------------------------------------------------------------
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.ipynb_checkpoints/
 .venv/
 venv/
+.mypy_cache/
+.ruff_cache/
 
-# ---- superseded training snapshots (fds_gestun_training_set.csv is canonical)
-fds_gestun_features_company.csv
-fds_gestun_features_company_v2.csv
-fds_gestun_features_company_v3.csv
-fds_gestun_features_company_v4.csv
-fds_gestun_features_company_v5.csv
-fds_gestun_features_company_v6.csv
+# --- editor / os -----------------------------------------------------------
+.DS_Store
+.vscode/*
+!.vscode/settings.json
 
-# ---- scoring run output --------------------------------------------------
-fds_gestun_features_compare.csv
-fds_gestun_features_35.csv
-fds_gestun_features_new13.csv
-fds_gestun_features_batch3.csv
-fds_comparison_predictions.csv
-compare_*.csv
-
-# ---- editor / backup noise ----
-*.bak
-*.bak[0-9]
-utils/
+# the labelled set including owner name and phone. Local only: the committed
+# fds_gestun_training_set.csv has those two columns removed, and the model
+# excludes them anyway (config.IDENTIFIER_FEATURES).
+fds_gestun_training_set_with_identifiers.csv
