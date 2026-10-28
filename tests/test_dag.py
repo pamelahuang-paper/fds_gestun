@@ -21,15 +21,22 @@ def test_dag_is_registered(dagbag):
 def test_task_graph_is_linear_and_complete(dagbag):
     dag = dagbag.dags["fds_gestun_scoring"]
     assert {t.task_id for t in dag.tasks} == {
-        "assert_source_is_fresh", "select_candidates", "build_features",
-        "score", "publish", "publish_transactions"}
+        "assert_source_is_fresh", "ensure_model", "select_candidates",
+        "build_features", "score", "publish", "publish_transactions",
+        "publish_to_sheet"}
     upstream = {t.task_id: sorted(t.upstream_task_ids) for t in dag.tasks}
     assert upstream["assert_source_is_fresh"] == []
+    assert upstream["ensure_model"] == []
     assert upstream["select_candidates"] == ["assert_source_is_fresh"]
-    assert upstream["build_features"] == ["select_candidates"]
+    # Both gates close before the expensive step: a missing model and a stale
+    # source are each cheaper to discover than a full scan of the mart.
+    assert upstream["build_features"] == ["ensure_model", "select_candidates"]
     assert upstream["score"] == ["build_features"]
     assert upstream["publish"] == ["score"]
     assert upstream["publish_transactions"] == ["score"]
+    # BigQuery is the record: the sheet waits for the table, so a Sheets outage
+    # cannot cost a week of scores.
+    assert upstream["publish_to_sheet"] == ["publish", "score"]
 
 
 def test_backfill_is_off(dagbag):
@@ -40,10 +47,18 @@ def test_backfill_is_off(dagbag):
 
 
 def test_threshold_default_is_the_review_queue_setting(dagbag):
-    """0.5 is the library default; the queue runs at 0.7 for precision."""
+    """The DAG runs at DEFAULT_THRESHOLD, not xgboost's 0.5. Pinned because the
+    flag rate is the whole argument: at 0.7 this called 33% of a week's
+    companies gestun, which is the training prior played back."""
+    import sys
+    sys.path.insert(0, "dags")
+    from fds_gestun_scoring import DEFAULT_THRESHOLD
     dag = dagbag.dags["fds_gestun_scoring"]
     # Airflow 3 resolves dag.params[...] to the value, not the Param object.
-    assert dag.params.dump()["threshold"] == 0.7
+    assert dag.params.dump()["threshold"] == DEFAULT_THRESHOLD
+    assert DEFAULT_THRESHOLD >= 0.9, (
+        "a threshold this low reproduces the training prior rather than "
+        "measuring the population")
 
 
 def test_freshness_gate_runs_before_any_work(dagbag):
@@ -194,7 +209,11 @@ def test_schema_and_scored_columns_agree():
     produced = {"company_id", "gestun_probability", "gestun_pct", "decision",
                 "risk_band", "features_present", "features_total"}
     attached = {"scored_date", "window_start", "window_end", "threshold",
-                "model_trained_on", "model_positives", "model_features"}
+                "model_trained_on", "model_positives", "model_features",
+                "n_txn_in_window", "tpv_in_window"}
+    # the rule layer merges these on in score(); review is the queue column
+    from fds_gestun import rules  # noqa: F401  (import proves the module ships)
+    attached |= {"rule_flag", "rule_hits", "review"}
     assert set(schema_cols) == produced | attached, (
         f"schema/columns drift: {set(schema_cols) ^ (produced | attached)}")
 
@@ -241,3 +260,37 @@ def test_transaction_schema_is_documented():
     from fds_gestun_scoring import TXN_SCHEMA
     for name, _, description in TXN_SCHEMA:
         assert description and len(description) > 10, f"{name} has no description"
+
+
+def test_transaction_volume_is_carried_to_the_output():
+    """A score is read differently on a company with 2 transactions than one with
+    200. The volume must travel with it, not require a separate join."""
+    import sys
+    sys.path.insert(0, "dags")
+    from fds_gestun_scoring import SCORE_SCHEMA
+    names = [n for n, _, _ in SCORE_SCHEMA]
+    assert "n_txn_in_window" in names
+    desc = dict((n, d) for n, _, d in SCORE_SCHEMA)["n_txn_in_window"]
+    assert "over-flags" in desc, "the caveat must travel with the column"
+
+
+# --- the reviewers' sheet ------------------------------------------------------
+
+def test_sheet_columns_are_documented_and_leave_room_for_reviewers():
+    """Reviewers own the columns to the right of the ones the DAG writes. If a
+    column is ever added to SHEET_COLUMNS without moving their data, the append
+    starts overwriting verdicts."""
+    import sys
+    sys.path.insert(0, "dags")
+    from fds_gestun_scoring import SHEET_COLUMNS, SHEET_REVIEWER_COLUMNS
+    assert [c for c, _ in SHEET_COLUMNS][0] == "window_end", (
+        "window_end must be column A: the idempotency check reads A:A alone")
+    assert all(doc.strip() for _, doc in SHEET_COLUMNS)
+    owned = {c for c, _ in SHEET_COLUMNS}
+    assert not owned & set(SHEET_REVIEWER_COLUMNS)
+
+
+def test_sheet_task_is_not_on_the_critical_path(dagbag):
+    """A Sheets failure must not fail the run that already published to BigQuery."""
+    dag = dagbag.dags["fds_gestun_scoring"]
+    assert dag.get_task("publish_to_sheet").downstream_task_ids == set()

@@ -33,14 +33,32 @@ jobs:
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
       - uses: google-github-actions/setup-gcloud@v2
 
+      # The workers import fds_gestun. It is a private package, so it cannot come
+      # from PyPI -- ship it inside the DAG folder instead. Composer puts
+      # /home/airflow/gcs/dags on sys.path, so dags/fds_gestun/ imports as
+      # fds_gestun with no pip install and no deploy key.
+      #
+      # config.REPO_DIR is the package's parent, which on the worker is the dags
+      # folder, so the two data files the package reads must sit beside it.
+      - name: Stage the package and its data files next to the DAG
+        run: |
+          rm -rf dags/fds_gestun
+          cp -r fds_gestun dags/fds_gestun
+          cp fds_gestun_training_set.csv fds_gestun_features_179.csv dags/
+          find dags -name '__pycache__' -type d -exec rm -rf {} +
+          python - <<'CHECK'
+          from pathlib import Path
+          for p in ("dags/fds_gestun/__init__.py", "dags/fds_gestun/sql",
+                    "dags/fds_gestun_training_set.csv",
+                    "dags/fds_gestun_features_179.csv"):
+              assert Path(p).exists(), f"missing after staging: {p}"
+          print("staged")
+          CHECK
+
       # Cloud Composer: the DAG folder is a GCS bucket.
       # Self-hosted Airflow: replace this step with an rsync to the dags folder.
+      #
+      # -d deletes what is no longer in dags/, which is what keeps a renamed or
+      # deleted module from lingering on the workers.
       - name: Sync DAG to Composer
         run: gsutil -m rsync -r -d dags "${{ secrets.COMPOSER_DAG_BUCKET }}/dags"
-
-      # The workers import fds_gestun, so a package change needs a reinstall.
-      - name: Update the package on the Composer environment
-        run: |
-          gcloud composer environments update "${{ secrets.COMPOSER_ENV }}" \
-            --location "${{ secrets.COMPOSER_REGION }}" \
-            --update-pypi-package "fds-gestun==$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
