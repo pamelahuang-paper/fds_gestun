@@ -88,8 +88,12 @@ venv/
 
 # --- editor / os -----------------------------------------------------------
 .DS_Store
-.vscode/*
-!.vscode/settings.json
+.vscode/
+.idea/
+
+# Local tool and editor config: personal absolute paths (~/.venvs, scratchpad
+# session ids) that would be wrong on anyone else's machine.
+.claude/
 
 # the labelled set including owner name and phone. Local only: the committed
 # fds_gestun_training_set.csv has those two columns removed, and the model
