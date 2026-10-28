@@ -265,6 +265,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="omit the label row above each block")
     p.add_argument("--dry-run", action="store_true",
                    help="build the block and print it; touch no sheet")
+    p.add_argument("--export", metavar="PATH", default=None,
+                   help="write the block to a CSV for pasting by hand instead "
+                        "of calling the API; for when credentials are blocked")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -276,6 +279,21 @@ def main(argv: list[str] | None = None) -> int:
         run_date = (str(frame["scored_date"].iloc[0])
                     if "scored_date" in frame.columns and len(frame)
                     else pd.Timestamp.today().strftime("%Y-%m-%d"))
+
+    if a.export:
+        header, rows = build_block(frame, run_date,
+                                   divider_row=not a.no_divider_row)
+        # Header included only for a first-ever paste; say so rather than guess.
+        pd.DataFrame(rows, columns=header).to_csv(a.export, index=False)
+        print(f"wrote {a.export}: {len(rows)} rows, {len(header)} columns\n"
+              f"run_date {run_date}\n\n"
+              f"Paste into the sheet:\n"
+              f"  empty tab      -> select A1, paste including the header row\n"
+              f"  existing data  -> select column A of the first empty row, then\n"
+              f"                    paste WITHOUT the header row\n"
+              f"Sheets splits pasted CSV across columns on import; if it lands in\n"
+              f"one column, use File > Import and choose Comma as the separator.")
+        return 0
 
     if a.dry_run:
         header, rows = build_block(frame, run_date,
