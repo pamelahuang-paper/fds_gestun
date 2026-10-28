@@ -36,7 +36,10 @@ dec*.csv
 
 # Keep the three files the package and the deploy actually need. Negations come
 # after the broad rules above, or git ignores them anyway.
-!fds_gestun_training_set.csv
+# fds_gestun_training_set.csv is deliberately NOT here. It is 582 paper.id
+# companies with investigation verdicts attached, including 377 cleared ones, so
+# it is data about identifiable third parties rather than code. This repo is
+# public; the training set is supplied out of band. See README, "Training data".
 !fds_gestun_features_179.csv
 !fds_gestun_feature_dictionary.csv
 
@@ -52,6 +55,7 @@ FDS_features.csv
 fds_comparison*.csv
 fds_gestun_features_*.csv
 !fds_gestun_features_179.csv
+fds_gestun_training_set.csv
 fds_gestun_predictions_*.csv
 fds_gestun_ptcv_partner.csv
 fds_gestun_training_clean_ids.csv

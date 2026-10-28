@@ -18,11 +18,24 @@ that will find the environment problems.
 
 ```bash
 pip install -e ".[dev]" && pytest -q      # 65 tests, no BigQuery needed
-fds-gestun train --eval                   # ~75s, no BigQuery needed
 ```
 
-Both pass from a clean checkout. If either fails, stop there and tell us rather
-than working around it.
+Passes from a clean checkout. If it fails, stop there and tell us rather than
+working around it.
+
+### Training data
+
+`fds-gestun train` needs `fds_gestun_training_set.csv` in the repository root,
+and this repository does not contain it. It is 582 paper.id companies with
+investigation verdicts attached, 205 confirmed gestun and 377 cleared, so it is
+data about identifiable customers rather than code and it is not published here.
+
+Ask the data team for it, or rebuild it with `fds_training_set_gestun.sql`
+against `datascience_public.fds_gestung_actual_label_130826`. Drop it in the
+root and `train` works; it is gitignored, so it cannot be committed by accident.
+
+Without it, the tests still pass in full and `train` fails with a message naming
+the missing file.
 
 Run outputs (`*_scores.csv`, `*_features.csv`, `*_review_queue.csv`) are
 gitignored: they are reproducible from BigQuery, they carry customer and owner
