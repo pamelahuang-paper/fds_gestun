@@ -2,6 +2,7 @@
 
     fds-gestun train      [--training-set CSV] [--eval]
     fds-gestun score      --companies IDS.csv [--out OUT.csv] [--threshold 0.7]
+                          [--min-tpv 10000000]
     fds-gestun features   --companies IDS.csv --out FEATURES.csv
     fds-gestun evaluate   [--thresholds]
 
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import config, evaluate, features as feat, model as model_mod
+from . import config, evaluate, features as feat, model as model_mod, rules as rules_mod
 
 log = logging.getLogger("fds_gestun")
 
@@ -98,10 +99,34 @@ def cmd_score(args: argparse.Namespace) -> int:
             "features_present": pd.NA, "features_total": len(model.feature_names)})
         result = pd.concat([result, labelled], ignore_index=True)
 
+    # The rule layer reads the same feature matrix. It never changes a model
+    # score; it adds a second reason to review a company the model scored clean.
+    if len(frame):
+        result = result.merge(rules_mod.apply_rules(frame), on="company_id", how="left")
+    else:
+        result["rule_flag"], result["rule_hits"] = False, ""
+    result["rule_flag"] = result["rule_flag"].fillna(False)
+    result["rule_hits"] = result["rule_hits"].fillna("")
+    # The queue gate, not the model's opinion: see model.review_queue. There is
+    # no scored window here, so the rupiah floor reads total_amount_last_7d --
+    # which the feature query anchors on the company's LAST transaction, not on
+    # a window. Close enough to rank a fresh batch; the DAG uses the real
+    # window value instead. --min-tpv 0 turns the floor off.
+    tpv = frame.set_index("company_id").get("total_amount_last_7d")
+    result["tpv"] = (result.company_id.map(tpv) if tpv is not None else 0.0)
+    result["review"] = model_mod.review_queue(
+        result.gestun_probability, result.rule_flag, result.tpv,
+        min_tpv=args.min_tpv)
+
     result.to_csv(args.out, index=False)
     flagged = int((result.decision == "GESTUN").sum())
+    by_rule_only = int((result.rule_flag & (result.decision != "GESTUN")).sum())
     print(f"wrote {args.out}: {len(result)} companies, {flagged} flagged GESTUN "
-          f"at threshold {args.threshold or config.DECISION_THRESHOLD}"
+          f"at threshold {args.threshold or config.DECISION_THRESHOLD}, "
+          f"plus {by_rule_only} flagged by rules only, "
+          f"{int(result.review.sum())} in the review queue "
+          f"(p>={config.REVIEW_THRESHOLD} or rule, and tpv>="
+          f"{args.min_tpv if args.min_tpv is not None else config.REVIEW_MIN_TPV:,.0f})"
           + (f" ({len(overlap)} carried their known label)" if overlap else ""))
     return 0
 
@@ -144,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--save-features", type=Path, help="cache the built features here")
     p.add_argument("--threshold", type=float, default=None)
+    p.add_argument("--min-tpv", type=float, default=None,
+                   help="rupiah floor for the review queue (default "
+                        "config.REVIEW_MIN_TPV; 0 disables it)")
     p.set_defaults(func=cmd_score)
 
     p = sub.add_parser("evaluate", help="cross-validated metrics")

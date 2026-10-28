@@ -82,7 +82,14 @@ def run_query(sql: str, *, company_ids: Sequence[str] | None = None,
         maximum_bytes_billed=config.BQ_MAX_BYTES_BILLED,
     )
     job = get_client().query(sql, job_config=job_config)
-    df = job.result(timeout=config.BQ_TIMEOUT_SECONDS).to_dataframe()
+    # create_bqstorage_client=False: the default path downloads through
+    # bigquerystorage.googleapis.com, a second host with its own DNS and gRPC
+    # channel. A transient resolution failure there killed a 20-minute feature
+    # build, and the Storage API buys nothing at this size -- every query here
+    # returns a few thousand rows, one per company. The REST download has no
+    # extra host to fail on.
+    df = job.result(timeout=config.BQ_TIMEOUT_SECONDS).to_dataframe(
+        create_bqstorage_client=False)
     log.debug("query returned %s rows, billed %s bytes", len(df),
               job.total_bytes_billed)
     return _coerce_numeric(df)

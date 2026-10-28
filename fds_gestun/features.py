@@ -30,6 +30,8 @@ SIMPLE_SOURCES = (
     ("partner_ratio", "partner_ratio.sql"),
     ("disbursement", "disbursement.sql"),
     ("payout_selfdealing", "payout_selfdealing.sql"),
+    ("payin_selfdealing", "payin_selfdealing.sql"),
+    ("payer_context", "payer_context.sql"),
     ("fingerprint", "fingerprint.sql"),
     ("ptcv_partner", "ptcv_partner.sql"),
 )
@@ -156,8 +158,9 @@ def model_feature_names() -> list[str]:
     """The features the model is allowed to see: everything in the dictionary
     except identifiers, the label, label-derived leaks and pipeline artifacts."""
     dictionary = pd.read_csv(config.FEATURE_DICT_PATH)
-    excluded = set(config.LEAKY_FEATURES) | set(config.PIPELINE_ARTIFACTS) | {
-        "company_id", "is_gestun"}
+    excluded = (set(config.LEAKY_FEATURES) | set(config.PIPELINE_ARTIFACTS)
+                | set(config.IDENTIFIER_FEATURES) | set(config.RULE_LAYER_FEATURES)
+                | {"company_id", "is_gestun"})
     base = [f for f in dictionary.feature if f not in excluded]
     return base + [f for f in config.PTCV_FEATURES if f not in base]
 

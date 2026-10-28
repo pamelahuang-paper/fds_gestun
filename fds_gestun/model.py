@@ -120,6 +120,35 @@ def risk_band(p: float) -> str:
     return "low"
 
 
+def review_queue(probability, rule_flag, tpv, threshold=None, min_tpv=None):
+    """Which companies a reviewer should actually open.
+
+        (probability >= REVIEW_THRESHOLD OR a rule fired) AND tpv >= REVIEW_MIN_TPV
+
+    Not the same question as `decision`. decision is the model's opinion at
+    DECISION_THRESHOLD; this is a capacity decision on top of it, and it is
+    deliberately stricter -- on the 17-23 Sep run it takes the queue from 2,054
+    companies to 954.
+
+    The rule branch is an OR because rules exist to catch what the model misses:
+    the two confirmed September cases in that window scored 0.62 and 0.64 and
+    reach the queue on R1/R2 alone. The rupiah floor, however, applies to rules
+    too -- a rule firing on a 15,000-rupiah week is not worth an hour.
+
+    tpv is the PAID value in the scored window. Missing tpv reads as 0 and so
+    fails the floor: a company we cannot value is not a company we can
+    prioritise. Pass min_tpv=0 to score a set with no window (the CLI does).
+    """
+    threshold = config.REVIEW_THRESHOLD if threshold is None else threshold
+    min_tpv = config.REVIEW_MIN_TPV if min_tpv is None else min_tpv
+    probability = pd.to_numeric(pd.Series(probability), errors="coerce").fillna(0.0)
+    rule_flag = pd.Series(rule_flag).fillna(False).astype(bool)
+    tpv = pd.to_numeric(pd.Series(tpv), errors="coerce").fillna(0.0)
+    rule_flag.index = probability.index
+    tpv.index = probability.index
+    return ((probability >= threshold) | rule_flag) & (tpv >= min_tpv)
+
+
 def _categorical_levels(frame: pd.DataFrame,
                         feature_names: Sequence[str]) -> dict[str, list[str]]:
     """Reading a CSV yields pandas StringDtype, not object, so test numeric-ness
