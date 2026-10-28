@@ -6,6 +6,29 @@ BigQuery data.
 Batch, not real-time: building the feature matrix is ~10 minutes of BigQuery per
 run, so this is a scheduled job, not a request/response service.
 
+## Reviewing this for the first time
+
+Read [HANDOVER.md](HANDOVER.md) first. It gives the task graph, the decisions
+that look wrong without their reason, what this needs from infrastructure, and
+the risks worth your attention. Then [DEPLOY.md](DEPLOY.md) for the steps.
+
+Nothing here has run on a scheduler yet. Every week produced so far came from a
+manual run, so the first supervised Composer run (DEPLOY.md step 6) is the one
+that will find the environment problems.
+
+```bash
+pip install -e ".[dev]" && pytest -q      # 65 tests, no BigQuery needed
+fds-gestun train --eval                   # ~75s, no BigQuery needed
+```
+
+Both pass from a clean checkout. If either fails, stop there and tell us rather
+than working around it.
+
+Run outputs (`*_scores.csv`, `*_features.csv`, `*_review_queue.csv`) are
+gitignored: they are reproducible from BigQuery, they carry customer and owner
+names, and one week of features is about 6 MB. The published copy of each week
+lives in `datascience_public.fds_gestun_scores`.
+
 ## Install
 
 ```bash
@@ -28,7 +51,7 @@ fds-gestun train --eval
 fds-gestun score --companies companies.csv --out scores.csv
 
 # raise the bar when review capacity is the constraint
-fds-gestun score --companies companies.csv --out scores.csv --threshold 0.7
+fds-gestun score --companies companies.csv --out scores.csv --threshold 0.99
 
 # build features without scoring, e.g. to cache them
 fds-gestun features --companies companies.csv --out features.csv
@@ -85,13 +108,22 @@ All via environment variables (see `fds_gestun/config.py`):
 | recall | 0.832 | 0.054 |
 | ROC-AUC | 0.960 | |
 
-Out-of-fold, by threshold:
+Out-of-fold, by threshold, and the flag rate each one produced on the 17-23 Sep
+week (5,643 companies). The flag rate is what the threshold is chosen on:
+precision barely moves above 0.90 while recall falls away.
 
-| threshold | precision | recall |
-|---|---|---|
-| 0.5 | 0.866 | 0.790 |
-| 0.7 | 0.932 | 0.737 |
-| 0.8 | 0.948 | 0.712 |
+| threshold | precision | recall | flag rate |
+|---|---|---|---|
+| 0.50 | 0.869 | 0.857 | 45% |
+| 0.90 | 0.918 | 0.707 | 25.0% |
+| 0.95 | 0.940 | 0.649 | 18.3% |
+| 0.98 | 0.963 | 0.512 | 9.6% |
+| **0.99** | 0.946 | 0.259 | **4.7%** |
+
+Measured on the 582 labelled companies, which are companies someone already
+found worth reviewing -- roughly one in three of them is gestun, against a
+population rate nobody has measured. Read the table as a ranking of the options,
+not as a promise about precision in production.
 
 ## Known limitations — read before acting on a score
 
@@ -195,9 +227,36 @@ pip install git+ssh://git@github.com/paper-id/fds-gestun.git@main
 Auth uses the `google_cloud_default` connection — do not set `FDS_GCP_CREDENTIALS`
 on the workers.
 
-The model artefact must exist on the worker (`FDS_MODEL_DIR`, default
-`./artifacts`). Either bake it in at image build time or add a `fds-gestun train`
-step ahead of `score`; training takes ~75s and needs no BigQuery.
+The model artefact does not need to be shipped. `artifacts/` is gitignored, so
+the `ensure_model` task rebuilds it on the worker when it is missing or was fit
+on a different number of companies than `fds_gestun_training_set.csv` holds --
+~75s, no BigQuery, deterministic given the committed training set and
+`config.SEED`. It runs before `build_features`, so a missing model fails the run
+before it pays for a scan of the mart. Set `FDS_MODEL_DIR` to a writable path if
+the default is read-only.
+
+### The reviewers' Google Sheet
+
+`publish_to_sheet` appends each week's review queue to one tab, `review_queue`,
+in a spreadsheet you own. Two things to set up:
+
+1. Create the spreadsheet, then set the Airflow Variable `fds_gestun_sheet_id`
+   to its id (the part of the URL between `/d/` and `/edit`). The environment
+   variable `FDS_GESTUN_SHEET_ID` works too. Unset, the task skips rather than
+   fails, so the pipeline runs before the sheet exists.
+2. Share the sheet with the Composer service account as **Editor**. Without it
+   the API returns 403 and only this task fails -- BigQuery is already written by
+   then.
+
+The task is append-only and writes columns A..I. `verdict`, `reviewer` and
+`notes` sit to the right and belong to the reviewers: nothing the DAG does
+touches them, and it never clears or rewrites a row. It is idempotent by
+`window_end`, so a retry finds its own week already present and stops.
+
+The consequence worth knowing: it cannot correct a week it has already
+published. Rescore into BigQuery and fix the sheet by hand -- the alternative is
+a task that deletes rows people may have annotated. The tab grows by about 360
+rows a week.
 
 ### Deploying the DAG
 
@@ -206,9 +265,15 @@ bucket. For self-hosted Airflow, swap the `gsutil rsync` step for an rsync to yo
 DAG folder. Required secrets: `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`,
 `COMPOSER_DAG_BUCKET`, `COMPOSER_ENV`, `COMPOSER_REGION`.
 
-The scheduled run uses threshold **0.7**, not the 0.5 library default: out-of-fold
-that is precision 0.932 against 0.866, which is what matters for a queue people
-actually work.
+The scheduled run uses threshold **0.99**, set from the flag rate rather than
+from a precision table: at 0.70 the model called 33% of a week's companies
+gestun, which is the training prior (35.2%) played back. 0.99 flags 4.7%, next
+to the 5.0% the old pprrsk001 model flags on the same population.
+
+The threshold is tuned to one model's score distribution and does not survive a
+retrain -- dropping two identifier features moved the median score 0.276 -> 0.404
+and turned 0.98 from a 5.3% flag rate into 9.6% on the same week. Re-measure the
+flag rate after every retrain.
 
 ## Retraining
 
